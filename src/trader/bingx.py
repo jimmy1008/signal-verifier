@@ -191,8 +191,14 @@ class BingXBroker(BaseBroker):
             mkt = self._market_cache.get(bingx_sym)
             if mkt:
                 units = mkt.round_quantity(units)
-                valid, reason = mkt.validate_order(
-                    await self._quick_price(bingx_sym) or 1, units)
+                current_price = await self._quick_price(bingx_sym) or 1
+                # 最低名義價值 = 帳戶餘額的 1%（風險金）× 5，避免開無意義的小倉
+                try:
+                    bal = await self.exchange.fetch_balance()
+                    min_notional = float(bal.get("USDT", {}).get("total", 0)) * 0.05
+                except Exception:
+                    min_notional = 5.0
+                valid, reason = mkt.validate_order(current_price, units, min_notional_override=min_notional)
                 if not valid:
                     logger.warning(f"下單驗證失敗 {bingx_sym}: {reason}")
                     return OrderResult(success=False, symbol=symbol, error=reason)

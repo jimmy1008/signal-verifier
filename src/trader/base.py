@@ -89,12 +89,13 @@ class MarketInfo(BaseModel):
             rounded = self.min_quantity
         return rounded
 
-    def validate_order(self, price: float, quantity: float) -> tuple[bool, str]:
+    def validate_order(self, price: float, quantity: float, min_notional_override: float = 0) -> tuple[bool, str]:
         if quantity < self.min_quantity:
             return False, f"數量 {quantity} < 最小量 {self.min_quantity}"
         notional = price * quantity
-        if notional < self.min_notional:
-            return False, f"名義價值 ${notional:.2f} < 最小 ${self.min_notional}"
+        effective_min = max(self.min_notional, min_notional_override)
+        if notional < effective_min:
+            return False, f"名義價值 ${notional:.2f} < 最小 ${effective_min}"
         return True, ""
 
 

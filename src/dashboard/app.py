@@ -36,6 +36,9 @@ def _inject_css():
 
     .block-container {{ padding: 0.2rem 0.8rem 0.5rem 0.8rem; }}
     header, footer, #MainMenu {{ visibility: hidden; height: 0; }}
+    /* 禁止 sidebar 收起 */
+    [data-testid="stSidebar"][aria-expanded="false"] {{ display: block !important; min-width: 250px !important; }}
+    button[kind="header"] {{ display: none !important; }}
 
 
     /* === Metric 卡片 === */

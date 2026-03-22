@@ -146,6 +146,27 @@ class CandleORM(Base):
     source = Column(String(50), default="binance")
 
 
+class BingxTradeORM(Base):
+    """BingX 成交紀錄本地存檔（防 API 歷史丟失）"""
+    __tablename__ = "bingx_trades"
+    __table_args__ = (UniqueConstraint('account', 'trade_id', name='uq_bingx_trade'),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account = Column(String(10), nullable=False)           # "h1" / "h4"
+    trade_id = Column(String(100), nullable=False)         # BingX order/trade ID
+    symbol = Column(String(50), nullable=False)
+    side = Column(String(10), nullable=False)              # "buy" / "sell"
+    position_side = Column(String(10), nullable=False)     # "LONG" / "SHORT"
+    price = Column(Float, nullable=False)
+    amount = Column(Float, nullable=False)                 # 合約數量
+    notional = Column(Float, nullable=False)               # USDT 名義價值
+    commission = Column(Float, default=0)                  # 手續費
+    order_type = Column(String(50), nullable=True)         # MARKET / STOP_MARKET / TAKE_PROFIT 等
+    timestamp = Column(DateTime, nullable=False)
+    raw_json = Column(JSON, nullable=True)                 # 完整原始數據
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class BacktestRunORM(Base):
     """回測執行紀錄"""
     __tablename__ = "backtest_runs"

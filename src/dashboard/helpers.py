@@ -199,11 +199,25 @@ def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
                     pass
             recent_trades = [t for t in recent_trades if t.get("timestamp", 0) >= TRADE_START_TS]
             recent_trades.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+            # 存入本地 DB
+            _save_trades_to_db(recent_trades, cache_label)
             recent_trades = recent_trades[:30]
         except Exception as _e:
             _log.debug(f"靜默異常: {_e}")
             pass
         _api_cache[trades_cache_key] = {"data": recent_trades, "ts": now}
+
+    # 合併本地 DB 歷史（API 可能只回傳最近 N 筆）
+    db_trades = _load_trades_from_db(cache_label)
+    if db_trades:
+        # 用 trade_id 去重合併
+        seen_ids = {t.get("id") or t.get("info", {}).get("orderId", "") for t in recent_trades}
+        for dt in db_trades:
+            if dt["trade_id"] not in seen_ids:
+                # 轉回 API 格式供 build_closed_positions 使用
+                recent_trades.append(dt["raw"])
+                seen_ids.add(dt["trade_id"])
+        recent_trades.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
 
     return account, open_pos, recent_trades, ex
 
@@ -291,6 +305,65 @@ def bot_status():
         _log.debug(f"靜默異常: {_e}")
         pass
     return "stopped"
+
+
+# ── 成交紀錄本地存檔 ─────────────────────────────────
+
+def _save_trades_to_db(trades, account_label):
+    """將 BingX 成交存入本地 DB（去重）"""
+    from datetime import datetime as _dt
+    try:
+        from src.models import BingxTradeORM
+        s = get_session()
+        saved = 0
+        for t in trades:
+            info = t.get("info", {})
+            trade_id = str(t.get("id") or info.get("orderId", ""))
+            if not trade_id:
+                continue
+            # 檢查是否已存在
+            exists = s.query(BingxTradeORM).filter_by(
+                account=account_label, trade_id=trade_id
+            ).first()
+            if exists:
+                continue
+            row = BingxTradeORM(
+                account=account_label,
+                trade_id=trade_id,
+                symbol=str(t.get("symbol", "")),
+                side=str(t.get("side", "")),
+                position_side=info.get("positionSide", ""),
+                price=float(t.get("price", 0)),
+                amount=float(t.get("amount", 0)),
+                notional=abs(float(info.get("amount", 0) or 0)),
+                commission=abs(float(info.get("commission", 0) or 0)),
+                order_type=info.get("type", ""),
+                timestamp=_dt.fromtimestamp(t.get("timestamp", 0) / 1000),
+                raw_json=t,
+            )
+            s.add(row)
+            saved += 1
+        if saved:
+            s.commit()
+            _log.debug(f"[{account_label}] 存入 {saved} 筆成交紀錄")
+        s.close()
+    except Exception as e:
+        _log.debug(f"存成交紀錄失敗: {e}")
+
+
+def _load_trades_from_db(account_label):
+    """從本地 DB 讀取歷史成交"""
+    try:
+        from src.models import BingxTradeORM
+        s = get_session()
+        rows = s.query(BingxTradeORM).filter_by(account=account_label).order_by(
+            BingxTradeORM.timestamp.desc()
+        ).all()
+        s.close()
+        return [{"trade_id": r.trade_id, "raw": r.raw_json} for r in rows if r.raw_json]
+    except Exception as e:
+        _log.debug(f"讀成交紀錄失敗: {e}")
+        return []
 
 
 # ── 已平倉重建 ──────────────────────────────────────

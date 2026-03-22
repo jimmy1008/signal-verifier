@@ -25,35 +25,65 @@ def _render_equity_curve(account, recent_trades):
     initial_capital = account.get("initial_capital", 100.0)
     current_equity = account.get("equity", account.get("balance", initial_capital))
 
-    # 用已平倉紀錄建立中間點
+    # 用已平倉紀錄建立曲線
     closed_list = build_closed_positions(recent_trades)
 
-    # 建立曲線：初始 → 每筆平倉累加 → 最後一點 = 當前餘額+浮盈
-    times = []
-    equity = []
-    cum = initial_capital
-
-    if closed_list:
+    if not closed_list:
+        # 無平倉紀錄，只畫初始→當前
+        times = [_dt.now().replace(hour=0, minute=0), _dt.now()]
+        equity = [initial_capital, current_equity]
+    else:
         sorted_closed = sorted(closed_list, key=lambda c: c["time"])
-        # 起點
+
+        # 計算時間跨度
         try:
-            times.append(_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M"))
+            first_ts = _dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")
+            last_ts = _dt.strptime(f"2026/{sorted_closed[-1]['time']}", "%Y/%m/%d %H:%M")
+            span_days = (last_ts - first_ts).days
         except Exception:
-            times.append(_dt.now())
-        equity.append(initial_capital)
+            span_days = 0
 
-        for c in sorted_closed:
-            cum += c["pnl"]
-            try:
-                ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
-            except Exception:
-                ts = times[-1]
-            times.append(ts)
-            equity.append(cum)
+        if span_days <= 3:
+            # 3 天內：每筆交易一個點
+            times = [_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")]
+            equity = [initial_capital]
+            cum = initial_capital
+            for c in sorted_closed:
+                cum += c["pnl"]
+                try:
+                    ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
+                except Exception:
+                    ts = times[-1]
+                times.append(ts)
+                equity.append(cum)
+        else:
+            # 超過 3 天：每日 24:00 結算一個點
+            from collections import defaultdict
+            daily_pnl = defaultdict(float)
+            for c in sorted_closed:
+                day = c["time"][:5]  # "MM/DD"
+                daily_pnl[day] += c["pnl"]
 
-    # 最後一點 = 當前淨值（餘額 + 浮盈）
-    times.append(_dt.now())
-    equity.append(current_equity)
+            times = []
+            equity = []
+            cum = initial_capital
+            for day in sorted(daily_pnl.keys()):
+                try:
+                    ts = _dt.strptime(f"2026/{day} 23:59", "%Y/%m/%d %H:%M")
+                except Exception:
+                    continue
+                cum += daily_pnl[day]
+                times.append(ts)
+                equity.append(cum)
+
+            # 第一天前加初始點
+            if times:
+                times.insert(0, times[0].replace(hour=0, minute=0))
+                equity.insert(0, initial_capital)
+
+        # 最後一點 = 當前淨值
+        times.append(_dt.now())
+        equity.append(current_equity)
 
     if len(equity) < 2:
         st.caption("數據不足")

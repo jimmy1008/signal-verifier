@@ -85,7 +85,7 @@ def tab_closed(results, signals):
                 f'</tr>'
             )
         st.markdown(f"""
-        <div style="max-height:500px;overflow-y:auto">
+        <div style="max-height:calc(100vh - 220px);overflow-y:auto">
         <table style="width:100%;border-collapse:collapse;font-family:'JetBrains Mono','Consolas',monospace;font-size:0.78rem">
         <thead><tr style="border-bottom:1px solid #333;color:#666;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.8px">
             <th style="padding:6px;text-align:left">平倉時間</th>

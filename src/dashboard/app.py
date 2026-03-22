@@ -254,7 +254,7 @@ def _inject_css():
         font-size: 0.68rem;
         line-height: 1.6;
         color: #8b949e;
-        height: 350px;
+        height: calc(100vh - 220px);
         overflow-y: auto;
     }}
     .log-box .log-time {{ color: #555; }}

@@ -349,12 +349,13 @@ def sidebar():
         b.metric("信號數", m.total_signals)
 
     st.sidebar.divider()
-    risk = st.sidebar.slider("風險 %", 0.1, 5.0, 1.0, 0.1)
     with st.sidebar.expander("策略規則"):
+        st.caption("風險: 2% / 筆")
         st.caption("TP1: 不出場")
-        st.caption("TP2: SL 移到 Entry（保本）")
-        st.caption("TP3: 出 50%（限價 Maker）")
+        st.caption("TP2: SL 移到 Entry（保本含手續費）")
+        st.caption("TP3: 出 50%")
         st.caption("TP4: 出 50%（全平）")
+        st.caption("SL 距離 < 0.1%: 不下單")
         st.caption("最大持倉: 無上限")
 
     st.sidebar.divider()
@@ -422,7 +423,6 @@ def sidebar():
         if st.button("↻ 刷新", key="sb_refresh", use_container_width=True):
             st.rerun()
 
-    st.session_state["risk"] = risk
     return results, signals
 
 

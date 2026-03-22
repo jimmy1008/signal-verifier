@@ -167,7 +167,8 @@ class DryRunBroker(BaseBroker):
 async def main():
     arg_parser = argparse.ArgumentParser(description="全自動交易")
     arg_parser.add_argument("--dry-run", action="store_true", help="模擬模式（不下單）")
-    arg_parser.add_argument("--risk", type=float, default=0.01, help="每筆風險比例（預設 0.01 = 1%%）")
+    _default_risk = load_config().get("trading", {}).get("risk_per_trade", 0.02)
+    arg_parser.add_argument("--risk", type=float, default=_default_risk, help="每筆風險比例（從 config 讀取）")
     arg_parser.add_argument("--max-positions", type=int, default=0, help="最大持倉數（0=無上限）")
     args = arg_parser.parse_args()
 

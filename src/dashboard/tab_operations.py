@@ -112,7 +112,7 @@ def _render_equity_curve(account, recent_trades):
 
     fig.add_trace(go.Scatter(
         x=times, y=equity, mode="lines", name="淨值",
-        line=dict(color=line_color, width=2, shape="spline", smoothing=0.8),
+        line=dict(color=line_color, width=2, shape="spline", smoothing=1.3),
         fill="tonexty", fillcolor=fill_color,
         hovertemplate="<b>%{x|%m/%d %H:%M}</b><br>$%{y:,.2f}<extra></extra>",
     ))

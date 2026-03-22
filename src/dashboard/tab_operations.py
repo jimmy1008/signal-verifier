@@ -19,101 +19,89 @@ _log = logging.getLogger(__name__)
 
 
 def _render_equity_curve(account, recent_trades):
-    """根據 BingX 成交紀錄建立資金曲線"""
-    if not recent_trades:
-        st.caption("尚無成交紀錄，無法生成資金曲線")
-        return
-
+    """根據餘額變化建立資金曲線"""
     from datetime import datetime as _dt
 
-    # 用 build_closed_positions 算已平倉盈虧（精確）
-    closed_list = build_closed_positions(recent_trades)
-    if not closed_list:
-        st.caption("尚無已平倉紀錄")
-        return
-
     initial_capital = account.get("initial_capital", 100.0)
+    current_equity = account.get("equity", account.get("balance", initial_capital))
 
-    # 建立資金曲線（按平倉時間排序）
-    sorted_closed = sorted(closed_list, key=lambda c: c["time"])
-    times = [_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")]
-    equity = [initial_capital]
+    # 用已平倉紀錄建立中間點
+    closed_list = build_closed_positions(recent_trades)
+
+    # 建立曲線：初始 → 每筆平倉累加 → 最後一點 = 當前餘額+浮盈
+    times = []
+    equity = []
     cum = initial_capital
 
-    for c in sorted_closed:
-        cum += c["pnl"]
+    if closed_list:
+        sorted_closed = sorted(closed_list, key=lambda c: c["time"])
+        # 起點
         try:
-            ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
+            times.append(_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M"))
         except Exception:
-            ts = times[-1]
-        times.append(ts)
-        equity.append(cum)
+            times.append(_dt.now())
+        equity.append(initial_capital)
 
-    # 手續費從成交紀錄統計
-    trade_points = []
-    for t in sorted(recent_trades, key=lambda x: x.get("timestamp", 0)):
-        try:
-            fee_obj = t.get("fee") or {}
-            fee = abs(float(fee_obj.get("cost", 0))) if isinstance(fee_obj, dict) else 0
-            trade_points.append({"fee": fee})
-        except Exception:
-            pass
+        for c in sorted_closed:
+            cum += c["pnl"]
+            try:
+                ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
+            except Exception:
+                ts = times[-1]
+            times.append(ts)
+            equity.append(cum)
+
+    # 最後一點 = 當前淨值（餘額 + 浮盈）
+    times.append(_dt.now())
+    equity.append(current_equity)
+
+    if len(equity) < 2:
+        st.caption("數據不足")
+        return
 
     eq_arr = np.array(equity)
     peak = np.maximum.accumulate(eq_arr)
     dd_pct = (eq_arr - peak) / np.where(peak > 0, peak, 1) * 100
 
-    # 資金曲線（單圖）
     fig = go.Figure()
 
-    is_profit = eq_arr[-1] >= initial_capital
+    is_profit = current_equity >= initial_capital
     line_color = GREEN if is_profit else RED
     fill_color = "rgba(0,200,5,0.06)" if is_profit else "rgba(255,75,75,0.06)"
 
     fig.add_trace(go.Scatter(
-        x=times, y=equity, mode="lines", name="資金",
+        x=times, y=equity, mode="lines", name="淨值",
         line=dict(color=line_color, width=2),
         fill="tozeroy", fillcolor=fill_color,
     ))
 
-    # 初始資金基線
     fig.add_hline(
         y=initial_capital, line_dash="dot", line_color=GRAY,
         annotation_text=f"初始 ${initial_capital:,.2f}",
         annotation_font_color=GRAY, annotation_font_size=10,
     )
 
-    # 峰值線
     fig.add_trace(go.Scatter(
         x=times, y=peak.tolist(), mode="lines", name="峰值",
         line=dict(color=BLUE, width=1, dash="dot"), opacity=0.4,
     ))
 
-    fig.update_layout(
-        **playout("", 250),
-        showlegend=False,
-    )
-    fig.update_yaxes(
-        title_text="$", tickformat=",.2f",
-        gridcolor=BORDER, zerolinecolor=BORDER,
-    )
+    fig.update_layout(**playout("", 250), showlegend=False)
+    fig.update_yaxes(title_text="$", tickformat=",.2f", gridcolor=BORDER, zerolinecolor=BORDER)
 
     st.plotly_chart(fig, use_container_width=True)
 
     # 曲線下方指標
     max_dd = float(np.min(dd_pct))
-    total_return_pct = (eq_arr[-1] - initial_capital) / initial_capital * 100 if initial_capital > 0 else 0
-    total_fees = sum(p["fee"] for p in trade_points)
+    total_return_pct = (current_equity - initial_capital) / initial_capital * 100
+    total_fees = sum(c["fee"] for c in closed_list) if closed_list else 0
 
-    # 勝率（用 build_closed_positions，BE 不計入勝敗）
-    closed_list = build_closed_positions(recent_trades)
     wins = sum(1 for c in closed_list if c["exit"] == "TP")
     losses = sum(1 for c in closed_list if c["exit"] == "SL")
     be_count = sum(1 for c in closed_list if c["exit"] == "BE")
-    total_closed = wins + losses  # BE 不影響勝率
+    total_closed = wins + losses
     win_rate = wins / total_closed * 100 if total_closed > 0 else 0
 
-    # 平均 RR（TP 平均盈利 / SL 平均虧損）
     tp_pnls = [c["pnl"] for c in closed_list if c["exit"] == "TP"]
     sl_pnls = [c["pnl"] for c in closed_list if c["exit"] == "SL"]
     avg_win = sum(tp_pnls) / len(tp_pnls) if tp_pnls else 0
@@ -427,11 +415,6 @@ def _show_profit_card():
 
 
 def tab_exec(results, signals):
-    # 曲線篩選（右上角）
-    _, col_select = st.columns([8.5, 1.5])
-    with col_select:
-        curve_view = st.selectbox("曲線", ["全部", "H1", "H4"],
-                                  label_visibility="collapsed", key="curve_view")
 
     # 用 fragment 實現局部自動刷新（不影響其他操作）
     @st.fragment(run_every=60)
@@ -505,16 +488,8 @@ def tab_exec(results, signals):
         col_curve, col_today = st.columns([7, 3])
 
         with col_curve:
-            cv = st.session_state.get("curve_view", "全部")
-            if cv == "H1":
-                curve_account = {**h1_account, "initial_capital": 100.0}
-                curve_trades = h1_trades or []
-            elif cv == "H4" and h4_account:
-                curve_account = {**h4_account, "initial_capital": 100.0}
-                curve_trades = h4_trades or []
-            else:
-                curve_account = {"balance": total_balance, "initial_capital": 200.0}
-                curve_trades = all_trades
+            curve_account = {"balance": total_balance, "equity": total_equity, "initial_capital": 200.0}
+            curve_trades = all_trades
             if curve_trades:
                 _render_equity_curve(curve_account, curve_trades)
 

@@ -35,9 +35,12 @@ def _inject_css():
     }}
 
     .block-container {{ padding: 0.2rem 0.8rem 0.5rem 0.8rem; }}
-    footer {{ visibility: hidden; }}
-    #MainMenu, .stDeployButton, [data-testid="collapsedControl"] {{ display: none !important; }}
+    footer {{ visibility: hidden !important; }}
+    #MainMenu {{ display: none !important; }}
+    .stDeployButton {{ display: none !important; }}
+    [data-testid="collapsedControl"] {{ display: none !important; }}
     [data-testid="stSidebar"] {{ transform: none !important; }}
+    header[data-testid="stHeader"] {{ background: transparent !important; }}
 
 
     /* === Metric 卡片 === */

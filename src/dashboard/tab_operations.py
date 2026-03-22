@@ -95,31 +95,54 @@ def _render_equity_curve(account, recent_trades):
 
     fig = go.Figure()
 
-    is_profit = current_equity >= initial_capital
-    line_color = GREEN if is_profit else RED
-    fill_color = "rgba(0,200,5,0.06)" if is_profit else "rgba(255,75,75,0.06)"
+    # 動態顏色：每段線根據是否高於初始資金變色
+    colors = [GREEN if v >= initial_capital else RED for v in equity]
 
-    # 初始資金基線（先畫，作為 fill 的底）
+    # 初始資金基線
     fig.add_trace(go.Scatter(
         x=times, y=[initial_capital] * len(times), mode="lines", name="初始",
         line=dict(color=GRAY, width=1, dash="dot"), opacity=0.3,
+        hoverinfo="skip",
     ))
+
+    # 主曲線（平滑 + 動態填充）
+    is_profit = current_equity >= initial_capital
+    fill_color = "rgba(0,200,5,0.06)" if is_profit else "rgba(255,75,75,0.06)"
+    line_color = GREEN if is_profit else RED
 
     fig.add_trace(go.Scatter(
         x=times, y=equity, mode="lines", name="淨值",
-        line=dict(color=line_color, width=2),
+        line=dict(color=line_color, width=2, shape="spline", smoothing=0.8),
         fill="tonexty", fillcolor=fill_color,
+        hovertemplate="<b>%{x|%m/%d %H:%M}</b><br>$%{y:,.2f}<extra></extra>",
     ))
 
+    # 峰值線
     fig.add_trace(go.Scatter(
         x=times, y=peak.tolist(), mode="lines", name="峰值",
         line=dict(color=BLUE, width=1, dash="dot"), opacity=0.4,
+        hoverinfo="skip",
     ))
 
-    # Y 軸範圍：最低點 -5% ~ 最高點 +5%
-    y_min = min(eq_arr) * 0.95
-    y_max = max(max(eq_arr), max(peak)) * 1.05
-    fig.update_layout(**playout("", 250), showlegend=False)
+    # 最新點發光標記
+    fig.add_trace(go.Scatter(
+        x=[times[-1]], y=[equity[-1]], mode="markers",
+        marker=dict(
+            size=8, color=GREEN if is_profit else RED,
+            line=dict(width=2, color="white"),
+        ),
+        hovertemplate=f"<b>當前</b><br>${equity[-1]:,.2f}<extra></extra>",
+    ))
+
+    # Y 軸範圍
+    y_min = min(eq_arr) * 0.97
+    y_max = max(max(eq_arr), max(peak)) * 1.03
+    fig.update_layout(
+        **playout("", 250),
+        showlegend=False,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#1e222d", font_size=12, font_family="JetBrains Mono"),
+    )
     fig.update_yaxes(title_text="$", tickformat=",.2f", gridcolor=BORDER, zerolinecolor=BORDER,
                      range=[y_min, y_max])
 

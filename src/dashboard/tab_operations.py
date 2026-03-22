@@ -107,25 +107,41 @@ def _render_equity_curve(account, recent_trades):
 
     fig = go.Figure()
 
-    # 動態顏色：每段線根據是否高於初始資金變色
-    colors = [GREEN if v >= initial_capital else RED for v in equity]
+    is_profit = current_equity >= initial_capital
 
-    # 初始資金基線
+    # 基線（初始資金）
     fig.add_trace(go.Scatter(
         x=times, y=[initial_capital] * len(times), mode="lines", name="初始",
-        line=dict(color=GRAY, width=1, dash="dot"), opacity=0.3,
+        line=dict(color=GRAY, width=1, dash="dot"), opacity=0.4,
         hoverinfo="skip",
     ))
 
-    # 主曲線（平滑 + 動態填充）
-    is_profit = current_equity >= initial_capital
-    fill_color = "rgba(0,200,5,0.06)" if is_profit else "rgba(255,75,75,0.06)"
-    line_color = GREEN if is_profit else RED
+    # 虧損填充：曲線低於基線的部分（淡紅）
+    loss_y = [min(v, initial_capital) for v in equity]
+    fig.add_trace(go.Scatter(
+        x=times, y=loss_y, mode="lines",
+        line=dict(width=0), showlegend=False,
+        fill="tonexty", fillcolor="rgba(255,75,75,0.08)",
+        hoverinfo="skip",
+    ))
 
+    # 盈利填充：曲線高於基線的部分（淡綠）
+    profit_y = [max(v, initial_capital) for v in equity]
+    fig.add_trace(go.Scatter(
+        x=times, y=[initial_capital] * len(times), mode="lines",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=times, y=profit_y, mode="lines",
+        line=dict(width=0), showlegend=False,
+        fill="tonexty", fillcolor="rgba(0,200,5,0.10)",
+        hoverinfo="skip",
+    ))
+
+    # 主曲線（中性白灰色線條）
     fig.add_trace(go.Scatter(
         x=times, y=equity, mode="lines", name="淨值",
-        line=dict(color=line_color, width=3, shape="spline", smoothing=0.6),
-        fill="tonexty", fillcolor=fill_color,
+        line=dict(color="#c9d1d9", width=2.5, shape="spline", smoothing=0.6),
         hovertemplate="<b>%{x|%m/%d %H:%M}</b><br>$%{y:,.2f}<extra></extra>",
     ))
 

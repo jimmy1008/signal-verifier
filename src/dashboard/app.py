@@ -35,10 +35,11 @@ def _inject_css():
     }}
 
     .block-container {{ padding: 0.2rem 0.8rem 0.5rem 0.8rem; }}
-    header, footer, #MainMenu {{ visibility: hidden; height: 0; }}
-    /* 禁止 sidebar 收起 */
-    [data-testid="stSidebar"][aria-expanded="false"] {{ display: block !important; min-width: 250px !important; }}
-    button[kind="header"] {{ display: none !important; }}
+    footer, #MainMenu {{ visibility: hidden; height: 0; }}
+    header[data-testid="stHeader"] {{ height: 0; overflow: hidden; }}
+    /* sidebar 永遠展開 */
+    [data-testid="collapsedControl"] {{ display: none !important; }}
+    [data-testid="stSidebar"] {{ transform: none !important; }}
 
 
     /* === Metric 卡片 === */

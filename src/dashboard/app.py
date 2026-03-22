@@ -63,6 +63,7 @@ def _inject_css():
         font-size: 1.1rem !important;
         font-family: 'JetBrains Mono', 'Roboto Mono', 'Consolas', monospace !important;
         color: #e6e6e6 !important;
+        font-weight: 700 !important;
     }}
 
     /* === 帳戶區塊色帶 === */
@@ -275,7 +276,7 @@ def _inject_css():
         font-size: 0.78rem;
     }}
     .stDataFrame td {{
-        padding: 8px 12px !important;
+        padding: 10px 12px !important;
     }}
     .stDataFrame th {{
         font-weight: 700 !important;

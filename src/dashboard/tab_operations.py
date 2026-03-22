@@ -99,25 +99,29 @@ def _render_equity_curve(account, recent_trades):
     line_color = GREEN if is_profit else RED
     fill_color = "rgba(0,200,5,0.06)" if is_profit else "rgba(255,75,75,0.06)"
 
+    # 初始資金基線（先畫，作為 fill 的底）
+    fig.add_trace(go.Scatter(
+        x=times, y=[initial_capital] * len(times), mode="lines", name="初始",
+        line=dict(color=GRAY, width=1, dash="dot"), opacity=0.3,
+    ))
+
     fig.add_trace(go.Scatter(
         x=times, y=equity, mode="lines", name="淨值",
         line=dict(color=line_color, width=2),
-        fill="tozeroy", fillcolor=fill_color,
+        fill="tonexty", fillcolor=fill_color,
     ))
-
-    fig.add_hline(
-        y=initial_capital, line_dash="dot", line_color=GRAY,
-        annotation_text=f"初始 ${initial_capital:,.2f}",
-        annotation_font_color=GRAY, annotation_font_size=10,
-    )
 
     fig.add_trace(go.Scatter(
         x=times, y=peak.tolist(), mode="lines", name="峰值",
         line=dict(color=BLUE, width=1, dash="dot"), opacity=0.4,
     ))
 
+    # Y 軸範圍：最低點 -5% ~ 最高點 +5%
+    y_min = min(eq_arr) * 0.95
+    y_max = max(max(eq_arr), max(peak)) * 1.05
     fig.update_layout(**playout("", 250), showlegend=False)
-    fig.update_yaxes(title_text="$", tickformat=",.2f", gridcolor=BORDER, zerolinecolor=BORDER)
+    fig.update_yaxes(title_text="$", tickformat=",.2f", gridcolor=BORDER, zerolinecolor=BORDER,
+                     range=[y_min, y_max])
 
     st.plotly_chart(fig, use_container_width=True)
 

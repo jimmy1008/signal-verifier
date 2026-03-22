@@ -367,12 +367,18 @@ def build_closed_positions(trades):
                 be_key = f"{sym}USDT.P|{pos_side.lower()}"
                 is_be_marked = be_marks.get(be_key, False)
 
+                # BE 判斷：有標記 OR 觸發價 ≈ 進場價（差距 < 0.2%）
+                stop_near_entry = abs(price - avg_entry) / avg_entry < D("0.002") if avg_entry > 0 else False
+
                 if "TAKE_PROFIT" in order_type:
                     exit_type = "TP"
                 elif "STOP" in order_type:
-                    exit_type = "BE" if is_be_marked else "SL"
+                    if is_be_marked or stop_near_entry:
+                        exit_type = "BE"
+                    else:
+                        exit_type = "SL"
                 else:
-                    if is_be_marked and abs(raw_pnl) < D("0.5"):
+                    if (is_be_marked or stop_near_entry) and abs(raw_pnl) < D("0.5"):
                         exit_type = "BE"
                     elif raw_pnl > D("0.1"):
                         exit_type = "TP"

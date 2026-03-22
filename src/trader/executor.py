@@ -177,6 +177,11 @@ class TradeExecutor:
             logger.info(f"跳過：{signal.symbol} 沒有 TP4")
             return None
 
+        # SL 距離太近（< 0.1%）不下單，避免倉位過大
+        if signal.entry > 0 and abs(signal.entry - signal.sl) / signal.entry < 0.001:
+            logger.info(f"跳過：{signal.symbol} SL 距離 {abs(signal.entry - signal.sl) / signal.entry:.4%} < 0.1%")
+            return None
+
         # 同 signal_key 不重複（同幣種可開多空/1H4H 共 4 倉）
         key = signal.related_signal_key or f"{signal.symbol}_{signal.side.value}_{signal.timeframe}_{signal.entry}"
         if key in self.active_trades and not self.active_trades[key].closed:

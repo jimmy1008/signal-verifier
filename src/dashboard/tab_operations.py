@@ -26,38 +26,38 @@ def _render_equity_curve(account, recent_trades):
 
     from datetime import datetime as _dt
 
-    # 從成交紀錄提取已實現盈虧，按時間排序（舊→新）
-    trade_points = []
-    for t in sorted(recent_trades, key=lambda x: x.get("timestamp", 0)):
-        try:
-            ts = _dt.fromtimestamp(t.get("timestamp", 0) / 1000)
-            pnl = float(t.get("info", {}).get("realizedPnl", 0)) if t.get("info") else 0
-            fee_obj = t.get("fee") or {}
-            fee = abs(float(fee_obj.get("cost", 0))) if isinstance(fee_obj, dict) else 0
-            net = pnl - fee
-            trade_points.append({"time": ts, "pnl": net, "fee": fee})
-        except Exception as _e:
-            _log.debug(f"靜默異常: {_e}")
-            continue
-
-    if not trade_points:
-        st.caption("無有效盈虧資料")
+    # 用 build_closed_positions 算已平倉盈虧（精確）
+    closed_list = build_closed_positions(recent_trades)
+    if not closed_list:
+        st.caption("尚無已平倉紀錄")
         return
 
-    # 推算初始資金 = 當前餘額 - 累計已實現盈虧
-    total_realized = sum(p["pnl"] for p in trade_points)
-    current_balance = account.get("balance", 0)
-    initial_capital = current_balance - total_realized
+    initial_capital = account.get("initial_capital", 100.0)
 
-    # 建立資金曲線
-    times = [trade_points[0]["time"]]
+    # 建立資金曲線（按平倉時間排序）
+    sorted_closed = sorted(closed_list, key=lambda c: c["time"])
+    times = [_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")]
     equity = [initial_capital]
     cum = initial_capital
 
-    for p in trade_points:
-        cum += p["pnl"]
-        times.append(p["time"])
+    for c in sorted_closed:
+        cum += c["pnl"]
+        try:
+            ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
+        except Exception:
+            ts = times[-1]
+        times.append(ts)
         equity.append(cum)
+
+    # 手續費從成交紀錄統計
+    trade_points = []
+    for t in sorted(recent_trades, key=lambda x: x.get("timestamp", 0)):
+        try:
+            fee_obj = t.get("fee") or {}
+            fee = abs(float(fee_obj.get("cost", 0))) if isinstance(fee_obj, dict) else 0
+            trade_points.append({"fee": fee})
+        except Exception:
+            pass
 
     eq_arr = np.array(equity)
     peak = np.maximum.accumulate(eq_arr)
@@ -507,13 +507,13 @@ def tab_exec(results, signals):
         with col_curve:
             cv = st.session_state.get("curve_view", "全部")
             if cv == "H1":
-                curve_account = h1_account
+                curve_account = {**h1_account, "initial_capital": 100.0}
                 curve_trades = h1_trades or []
             elif cv == "H4" and h4_account:
-                curve_account = h4_account
+                curve_account = {**h4_account, "initial_capital": 100.0}
                 curve_trades = h4_trades or []
             else:
-                curve_account = {"balance": total_balance}
+                curve_account = {"balance": total_balance, "initial_capital": 200.0}
                 curve_trades = all_trades
             if curve_trades:
                 _render_equity_curve(curve_account, curve_trades)

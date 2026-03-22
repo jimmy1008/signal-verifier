@@ -429,7 +429,13 @@ def sidebar():
 # ── Main ─────────────────────────────────────────────
 
 def main():
-    r, s = sidebar()
+    try:
+        r, s = sidebar()
+    except Exception as e:
+        st.error(f"Sidebar 錯誤: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return
     if not r:
         st.info("請先執行回測")
         return

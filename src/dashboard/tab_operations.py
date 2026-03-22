@@ -81,8 +81,20 @@ def _render_equity_curve(account, recent_trades):
                 times.insert(0, times[0].replace(hour=0, minute=0))
                 equity.insert(0, initial_capital)
 
-        # 最後一點 = 當前淨值
-        times.append(_dt.now())
+        # 最後一點 = 當前淨值（插入過渡點避免垂直跳躍）
+        from datetime import timedelta
+        last_val = equity[-1] if equity else initial_capital
+        now = _dt.now()
+        if abs(current_equity - last_val) > 1.0 and times:
+            # 在最後一個數據點和現在之間插 2 個過渡點
+            gap = now - times[-1]
+            step = gap / 3
+            diff = current_equity - last_val
+            times.append(times[-1] + step)
+            equity.append(last_val + diff * 0.3)
+            times.append(times[-2] + step * 2)
+            equity.append(last_val + diff * 0.7)
+        times.append(now)
         equity.append(current_equity)
 
     if len(equity) < 2:

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time as _time
 from pathlib import Path
 
 import numpy as np
 import streamlit as st
+
+_log = logging.getLogger(__name__)
 
 from src.database import init_db, get_session
 from src.models import BacktestRunORM, TradeResultORM, SignalORM
@@ -373,9 +376,6 @@ def build_closed_positions(trades):
     from datetime import datetime as _dt
     from decimal import Decimal, ROUND_HALF_UP
     import json as _json
-    import logging
-
-    _log = logging.getLogger(__name__)
 
     be_marks = {}
     try:

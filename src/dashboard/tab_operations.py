@@ -454,18 +454,11 @@ def tab_exec(results, signals):
         upnl_class = "pnl-pos" if total_upnl > 0 else ("pnl-neg" if total_upnl < 0 else "pnl-zero")
         pnl_border = GREEN if total_upnl > 0 else (RED if total_upnl < 0 else BORDER)
 
-        # 統計 TP/SL/BE — 用 build_closed_positions 保持一致
-        _tp_count = _sl_count = _be_count = 0
-        for _trades in [h1_trades or [], h4_trades or []]:
-            for c in build_closed_positions(_trades):
-                if c["exit"] == "TP":
-                    _tp_count += 1
-                elif c["exit"] == "SL":
-                    _sl_count += 1
-                elif c["exit"] == "BE":
-                    _be_count += 1
-                else:
-                    _be_count += 1
+        # 統計 TP/SL/BE — 合併全量數據一次計算
+        _all_closed = build_closed_positions((h1_trades or []) + (h4_trades or []))
+        _tp_count = sum(1 for c in _all_closed if c["exit"] == "TP")
+        _sl_count = sum(1 for c in _all_closed if c["exit"] == "SL")
+        _be_count = sum(1 for c in _all_closed if c["exit"] == "BE")
 
         st.markdown(
             f'<div style="display:flex;gap:12px;margin-bottom:8px">'

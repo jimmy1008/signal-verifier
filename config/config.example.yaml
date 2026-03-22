@@ -1,0 +1,54 @@
+# === Telegram ===
+telegram:
+  api_id: YOUR_API_ID          # 從 https://my.telegram.org 取得
+  api_hash: "YOUR_API_HASH"
+  phone: "+886xxxxxxxxx"
+  session_name: "signal_verifier"
+  # 要監聽的頻道（chat_id 或 username）
+  channels:
+    - chat_id: -1001234567890
+      name: "signal_channel_1"
+      parser: "default"         # 對應 parsers 裡的 parser 名稱
+
+# === Market Data ===
+market_data:
+  default_source: "binance"
+  binance:
+    # 不需要 API key（只讀公開 K 線）
+    default_timeframe: "15m"
+  # Symbol 映射：頻道用的名稱 → 交易所代號
+  symbol_mapping:
+    "BTC": "BTC/USDT"
+    "ETH": "ETH/USDT"
+    "BTCUSDT": "BTC/USDT"
+    "ETHUSDT": "ETH/USDT"
+    "XAUUSD": "XAU/USD"        # 需要其他資料源
+
+# === Backtest ===
+backtest:
+  default_mode: "single_tp"     # single_tp | partial_tp | breakeven | custom
+  single_tp:
+    target: "tp2"               # 以哪個 TP 為出場目標
+  partial_tp:
+    tp1_pct: 0.25
+    tp2_pct: 0.25
+    tp3_pct: 0.25
+    tp4_pct: 0.25
+  breakeven:
+    move_sl_after: "tp1"        # 到 TP1 後 SL 移到 Entry
+  # 同 K 線觸發順序
+  ambiguous_candle: "conservative"  # conservative（優先 SL）| optimistic（優先 TP）
+  # 信號過期
+  signal_expiry:
+    enabled: true
+    max_bars: 48                # 發出後 N 根 K 線內未觸發 entry → 作廢
+    max_hours: 72               # 或超過 N 小時
+
+# === Database ===
+database:
+  url: "sqlite:///db/signals.db"
+
+# === Dashboard ===
+dashboard:
+  host: "localhost"
+  port: 8501

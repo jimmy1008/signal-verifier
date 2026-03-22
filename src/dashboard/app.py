@@ -24,7 +24,10 @@ from src.dashboard.tab_research import tab_research
 
 st.set_page_config(page_title="Signal Verifier", page_icon="SV", layout="wide")
 
-st.markdown(f"""
+
+def _inject_css():
+    """注入全域 CSS 樣式"""
+    st.markdown(f"""
 <style>
     /* === 背景漸變 === */
     .stApp {{
@@ -310,6 +313,9 @@ st.markdown(f"""
     }}
 </style>
 """, unsafe_allow_html=True)
+
+
+_inject_css()
 
 
 # ── Sidebar ──────────────────────────────────────────

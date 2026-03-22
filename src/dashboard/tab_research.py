@@ -19,6 +19,17 @@ from src.dashboard.helpers import (
 
 
 def tab_backtest(results, signals):
+    # 時間範圍篩選
+    from datetime import datetime, timedelta
+    col_filter, _ = st.columns([3, 7])
+    with col_filter:
+        range_opt = st.selectbox("時間範圍", ["全部", "最近 1 個月", "最近 3 個月", "最近 6 個月"],
+                                 key="bt_range", label_visibility="collapsed")
+    if range_opt != "全部":
+        months = {"最近 1 個月": 30, "最近 3 個月": 90, "最近 6 個月": 180}[range_opt]
+        cutoff = datetime.utcnow() - timedelta(days=months)
+        results = [r for r in results if r.entry_time and r.entry_time >= cutoff]
+
     m = compute_metrics(results)
 
     c1, c2, c3, c4, c5 = st.columns(5)

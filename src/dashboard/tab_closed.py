@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,8 @@ from src.dashboard.helpers import (
     GREEN, RED, BLUE, GRAY,
     get_bingx_data, build_closed_positions, get_project_root,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def tab_closed(results, signals):

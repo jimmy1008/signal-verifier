@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,8 @@ from src.dashboard.helpers import (
     TRADE_START_TS, BG, CARD, BORDER, GREEN, RED, YELLOW, BLUE, GRAY, TEXT,
     get_bingx_data, build_closed_positions, get_project_root, playout,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _render_equity_curve(account, recent_trades):
@@ -33,7 +36,8 @@ def _render_equity_curve(account, recent_trades):
             fee = abs(float(fee_obj.get("cost", 0))) if isinstance(fee_obj, dict) else 0
             net = pnl - fee
             trade_points.append({"time": ts, "pnl": net, "fee": fee})
-        except Exception:
+        except Exception as _e:
+            _log.debug(f"靜默異常: {_e}")
             continue
 
     if not trade_points:
@@ -213,7 +217,8 @@ def _render_account_section(label, account, positions, ex):
                     try:
                         orders = ex.fetch_open_orders(sym)
                         all_orders.extend(orders)
-                    except Exception:
+                    except Exception as _e:
+                        _log.debug(f"靜默異常: {_e}")
                         pass
                 if all_orders:
                     # 建立持倉查找表（symbol+side → entry_price, contracts）
@@ -307,7 +312,8 @@ def _check_timeframe_mismatch(h1_positions, h4_positions):
                 warnings.append(f"4H 信號 {symbol} 被路由到 H1 主帳戶")
             elif "4" not in tf and "H4" in target:
                 warnings.append(f"1H 信號 {symbol} 被路由到 H4 子帳戶")
-    except Exception:
+    except Exception as _e:
+        _log.debug(f"靜默異常: {_e}")
         pass
 
     return warnings
@@ -358,7 +364,8 @@ def _show_profit_card():
             fee_obj = t.get("fee") or {}
             fee = abs(float(fee_obj.get("cost", 0))) if isinstance(fee_obj, dict) else 0
             trade_points.append({"time": ts, "pnl": pnl - fee, "fee": fee})
-        except Exception:
+        except Exception as _e:
+            _log.debug(f"靜默異常: {_e}")
             continue
 
     if trade_points:
@@ -533,7 +540,8 @@ def tab_exec(results, signals):
                     fee = float(fee_obj.get("cost", 0)) if isinstance(fee_obj, dict) else 0
                     total_fee += abs(fee)
                     today_count += 1
-                except Exception:
+                except Exception as _e:
+                    _log.debug(f"靜默異常: {_e}")
                     continue
 
             st.metric("成交筆數", today_count)

@@ -85,10 +85,18 @@ _CACHE_TTL_ACCOUNT = 30
 _CACHE_TTL_TRADES = 120
 
 
+@st.cache_resource
+def _get_ccxt_instance(api_key: str, api_secret: str):
+    """快取 ccxt 實例（不重複建立）"""
+    import ccxt
+    return ccxt.bingx({
+        "apiKey": api_key, "secret": api_secret,
+        "options": {"defaultType": "swap"},
+    })
+
+
 def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
     """從一個 BingX 帳戶取得帳戶 + 持倉 + 成交（帶快取）"""
-    import ccxt
-
     now = _time.time()
     cache_key = f"bingx_{cache_label}"
     cached = _api_cache.get(cache_key)
@@ -104,10 +112,7 @@ def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
         positions_raw = cached["positions_raw"]
         open_pos = cached["positions"]
     else:
-        ex = ccxt.bingx({
-            "apiKey": api_key, "secret": api_secret,
-            "options": {"defaultType": "swap"},
-        })
+        ex = _get_ccxt_instance(api_key, api_secret)
 
         balance = ex.fetch_balance()
         usdt = balance.get("USDT", {})
@@ -189,12 +194,14 @@ def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
                     trades = ex.fetch_my_trades(sym, limit=10)
                     recent_trades.extend(trades)
                     _time.sleep(0.3)
-                except Exception:
+                except Exception as _e:
+                    _log.debug(f"靜默異常: {_e}")
                     pass
             recent_trades = [t for t in recent_trades if t.get("timestamp", 0) >= TRADE_START_TS]
             recent_trades.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
             recent_trades = recent_trades[:30]
-        except Exception:
+        except Exception as _e:
+            _log.debug(f"靜默異常: {_e}")
             pass
         _api_cache[trades_cache_key] = {"data": recent_trades, "ts": now}
 
@@ -262,7 +269,8 @@ def stop_bot():
             if line.isdigit():
                 subprocess.run(["taskkill", "/PID", line, "/F"], timeout=5)
                 return True
-    except Exception:
+    except Exception as _e:
+        _log.debug(f"靜默異常: {_e}")
         pass
     return False
 
@@ -279,7 +287,8 @@ def bot_status():
         for line in result.stdout.strip().split("\n"):
             if line.strip().isdigit():
                 return "running"
-    except Exception:
+    except Exception as _e:
+        _log.debug(f"靜默異常: {_e}")
         pass
     return "stopped"
 
@@ -287,21 +296,28 @@ def bot_status():
 # ── 已平倉重建 ──────────────────────────────────────
 
 def build_closed_positions(trades):
-    """從成交紀錄重建已平倉位，用 USDT 名義價值差計算盈虧"""
+    """從成交紀錄重建已平倉位，用 Decimal 精度計算盈虧"""
     from datetime import datetime as _dt
+    from decimal import Decimal, ROUND_HALF_UP
     import json as _json
+    import logging
+
+    _log = logging.getLogger(__name__)
 
     be_marks = {}
     try:
         be_path = Path(__file__).resolve().parent.parent.parent / "db" / "be_marks.json"
         if be_path.exists():
             be_marks = _json.loads(be_path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as _e:
+        _log.debug(f"靜默異常: {_e}")
         pass
 
-    opens = {}
+    opens = {}  # key: (sym, posSide) → {notional: Decimal, fee: Decimal, price: Decimal}
     closed = []
     seen = set()
+
+    D = Decimal  # 簡寫
 
     for t in sorted(trades, key=lambda x: x.get("timestamp", 0)):
         try:
@@ -309,12 +325,12 @@ def build_closed_positions(trades):
             pos_side = info.get("positionSide", "")
             side = str(t.get("side", "")).lower()
             sym = str(t.get("symbol", "")).replace("/USDT:USDT", "").replace("-", "")
-            price = float(t.get("price", 0))
-            fee = abs(float(info.get("commission", 0) or 0))
+            price = D(str(t.get("price", 0) or 0))
+            fee = abs(D(str(info.get("commission", 0) or 0)))
             ts = _dt.fromtimestamp(t.get("timestamp", 0) / 1000)
-            notional = abs(float(info.get("amount", 0) or 0))
+            notional = abs(D(str(info.get("amount", 0) or 0)))
             if notional == 0:
-                notional = abs(float(t.get("cost", 0) or 0))
+                notional = abs(D(str(t.get("cost", 0) or 0)))
 
             is_open = (pos_side == "LONG" and side == "buy") or (pos_side == "SHORT" and side == "sell")
             is_close = (pos_side == "LONG" and side == "sell") or (pos_side == "SHORT" and side == "buy")
@@ -337,9 +353,9 @@ def build_closed_positions(trades):
 
                 entry_info = opens.get(k)
                 avg_entry = entry_info["price"] if entry_info and entry_info["notional"] > 0 else price
-                entry_fee = entry_info["fee"] if entry_info else 0
+                entry_fee = entry_info["fee"] if entry_info else D("0")
 
-                equiv_qty = notional / price if price > 0 else 0
+                equiv_qty = notional / price if price > 0 else D("0")
                 if pos_side == "LONG":
                     raw_pnl = (price - avg_entry) * equiv_qty
                 else:
@@ -356,9 +372,9 @@ def build_closed_positions(trades):
                 elif "STOP" in order_type:
                     exit_type = "BE" if is_be_marked else "SL"
                 else:
-                    if is_be_marked and abs(raw_pnl) < 0.5:
+                    if is_be_marked and abs(raw_pnl) < D("0.5"):
                         exit_type = "BE"
-                    elif raw_pnl > 0.1:
+                    elif raw_pnl > D("0.1"):
                         exit_type = "TP"
                     else:
                         exit_type = "SL"
@@ -366,7 +382,7 @@ def build_closed_positions(trades):
                 closed.append({
                     "time": ts.strftime("%m/%d %H:%M"),
                     "sym": sym, "dir": pos_side, "exit": exit_type,
-                    "pnl": net_pnl, "fee": fee,
+                    "pnl": float(net_pnl), "fee": float(fee),
                 })
 
                 if entry_info:
@@ -374,8 +390,9 @@ def build_closed_positions(trades):
                     if entry_info["notional"] <= 0:
                         del opens[k]
                     else:
-                        entry_info["fee"] = 0
-        except Exception:
+                        entry_info["fee"] = D("0")
+        except Exception as e:
+            _log.debug(f"build_closed_positions 解析失敗: {e}")
             continue
 
     closed.reverse()

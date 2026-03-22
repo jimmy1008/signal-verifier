@@ -437,24 +437,29 @@ def main():
         st.error(f"Sidebar 錯誤: {e}")
         import traceback
         st.code(traceback.format_exc())
-        return
+        r, s = None, None
+
     if not r:
-        st.info("請先執行回測")
-        return
+        st.warning("請先執行回測（或 sidebar 載入失敗）")
 
-    r = clean_results(r)
-
+    # tabs 永遠渲染（不管 sidebar 是否成功）
     t1, t2, t3, t4 = st.tabs([
         "執行總覽", "信號動態", "已平倉", "研究室",
     ])
     with t1:
         tab_exec(r, s)
     with t2:
-        tab_signals(r, s)
+        if r:
+            tab_signals(r, s)
+        else:
+            st.info("等待回測資料...")
     with t3:
         tab_closed(r, s)
     with t4:
-        tab_research(r, s)
+        if r:
+            tab_research(r, s)
+        else:
+            st.info("等待回測資料...")
 
 
 if __name__ == "__main__":

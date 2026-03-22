@@ -35,8 +35,9 @@ def _inject_css():
     }}
 
     .block-container {{ padding: 0.2rem 0.8rem 0.5rem 0.8rem; }}
-    footer, #MainMenu {{ visibility: hidden; height: 0; }}
-    header[data-testid="stHeader"] {{ height: 0; overflow: hidden; }}
+    footer, #MainMenu, [data-testid="stStatusWidget"],
+    button[kind="header"], .stDeployButton {{ visibility: hidden; height: 0; }}
+    header[data-testid="stHeader"] {{ height: 2rem; }}
     /* sidebar 永遠展開 */
     [data-testid="collapsedControl"] {{ display: none !important; }}
     [data-testid="stSidebar"] {{ transform: none !important; }}

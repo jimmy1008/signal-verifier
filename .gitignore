@@ -11,3 +11,5 @@ output/
 config/config.yaml
 .venv/
 venv/
+reports/
+backups/

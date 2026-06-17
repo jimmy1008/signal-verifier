@@ -18,84 +18,61 @@ from src.dashboard.helpers import (
 _log = logging.getLogger(__name__)
 
 
-def _render_equity_curve(account, recent_trades):
+def _render_equity_curve(account, recent_trades, paper_mode=False):
     """根據餘額變化建立資金曲線"""
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timedelta
 
     initial_capital = account.get("initial_capital", 100.0)
     current_equity = account.get("equity", account.get("balance", initial_capital))
-
-    # 用已平倉紀錄建立曲線
-    closed_list = build_closed_positions(recent_trades)
+    if paper_mode:
+        # Paper 模式：trades 已是 closed list 格式
+        closed_list = [t for t in recent_trades if "pnl" in t]
+    else:
+        closed_list = build_closed_positions(recent_trades)
 
     if not closed_list:
-        # 無平倉紀錄，只畫初始→當前
         times = [_dt.now().replace(hour=0, minute=0), _dt.now()]
         equity = [initial_capital, current_equity]
     else:
+        # 按時間排序，同一分鐘的交易合併為一個數據點
         sorted_closed = sorted(closed_list, key=lambda c: c["time"])
+        from collections import OrderedDict
+        time_buckets = OrderedDict()
+        for c in sorted_closed:
+            t = c["time"]
+            if t not in time_buckets:
+                time_buckets[t] = 0.0
+            time_buckets[t] += c["pnl"]
 
-        # 計算時間跨度
+        times = []
+        equity = []
+        cum = initial_capital
+
+        # 起始點
         try:
             first_ts = _dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")
-            last_ts = _dt.strptime(f"2026/{sorted_closed[-1]['time']}", "%Y/%m/%d %H:%M")
-            span_days = (last_ts - first_ts).days
+            times.append(first_ts - timedelta(minutes=1))
+            equity.append(initial_capital)
         except Exception:
-            span_days = 0
+            pass
 
-        if span_days <= 3:
-            # 3 天內：每筆交易一個點
-            times = [_dt.strptime(f"2026/{sorted_closed[0]['time']}", "%Y/%m/%d %H:%M")]
-            equity = [initial_capital]
-            cum = initial_capital
-            for c in sorted_closed:
-                cum += c["pnl"]
-                try:
-                    ts = _dt.strptime(f"2026/{c['time']}", "%Y/%m/%d %H:%M")
-                except Exception:
-                    ts = times[-1]
-                times.append(ts)
-                equity.append(cum)
-        else:
-            # 超過 3 天：每日 24:00 結算一個點
-            from collections import defaultdict
-            daily_pnl = defaultdict(float)
-            for c in sorted_closed:
-                day = c["time"][:5]  # "MM/DD"
-                daily_pnl[day] += c["pnl"]
+        for t_str, pnl in time_buckets.items():
+            cum += pnl
+            try:
+                ts = _dt.strptime(f"2026/{t_str}", "%Y/%m/%d %H:%M")
+            except Exception:
+                continue
+            # 確保時間嚴格遞增
+            if times and ts <= times[-1]:
+                ts = times[-1] + timedelta(seconds=1)
+            times.append(ts)
+            equity.append(cum)
 
-            times = []
-            equity = []
-            cum = initial_capital
-            for day in sorted(daily_pnl.keys()):
-                try:
-                    ts = _dt.strptime(f"2026/{day} 23:59", "%Y/%m/%d %H:%M")
-                except Exception:
-                    continue
-                cum += daily_pnl[day]
-                times.append(ts)
-                equity.append(cum)
-
-            # 第一天前加初始點
-            if times:
-                times.insert(0, times[0].replace(hour=0, minute=0))
-                equity.insert(0, initial_capital)
-
-        # 最後一點 = 當前淨值（插入過渡點避免垂直跳躍）
-        from datetime import timedelta
-        last_val = equity[-1] if equity else initial_capital
+        # 末端：當前淨值
         now = _dt.now()
-        if abs(current_equity - last_val) > 1.0 and times:
-            # 在最後一個數據點和現在之間插 2 個過渡點
-            gap = now - times[-1]
-            step = gap / 3
-            diff = current_equity - last_val
-            times.append(times[-1] + step)
-            equity.append(last_val + diff * 0.3)
-            times.append(times[-2] + step * 2)
-            equity.append(last_val + diff * 0.7)
-        times.append(now)
-        equity.append(current_equity)
+        if times and now > times[-1]:
+            times.append(now)
+            equity.append(current_equity)
 
     if len(equity) < 2:
         st.caption("數據不足")
@@ -104,83 +81,50 @@ def _render_equity_curve(account, recent_trades):
     eq_arr = np.array(equity)
     peak = np.maximum.accumulate(eq_arr)
     dd_pct = (eq_arr - peak) / np.where(peak > 0, peak, 1) * 100
+    cap = initial_capital
 
     fig = go.Figure()
 
-    is_profit = current_equity >= initial_capital
+    # ── 基線 ──
+    fig.add_hline(y=cap, line_dash="dot", line_color="#333", opacity=0.25)
 
-    # 基線（退到背景，深灰低透明）
-    fig.add_trace(go.Scatter(
-        x=times, y=[initial_capital] * len(times), mode="lines", name="初始",
-        line=dict(color="#333", width=1, dash="dot"), opacity=0.25,
-        hoverinfo="skip",
-    ))
+    # ── 漸變填充 ──
+    line_color = "#00e5cc" if equity[-1] >= cap else "#ff5252"
+    fill_color = "rgba(0,229,204,0.08)" if equity[-1] >= cap else "rgba(255,82,82,0.08)"
 
-    # 虧損填充：基線以下（暗紅）
-    loss_y = [min(v, initial_capital) for v in equity]
     fig.add_trace(go.Scatter(
-        x=times, y=loss_y, mode="lines",
+        x=times, y=equity, mode="lines",
         line=dict(width=0), showlegend=False,
-        fill="tonexty", fillcolor="rgba(255,60,60,0.06)",
-        hoverinfo="skip",
+        fill="tozeroy", fillcolor=fill_color, hoverinfo="skip",
     ))
 
-    # 盈利填充：基線以上（亮綠）
-    profit_y = [max(v, initial_capital) for v in equity]
-    fig.add_trace(go.Scatter(
-        x=times, y=[initial_capital] * len(times), mode="lines",
-        line=dict(width=0), showlegend=False, hoverinfo="skip",
-    ))
-    fig.add_trace(go.Scatter(
-        x=times, y=profit_y, mode="lines",
-        line=dict(width=0), showlegend=False,
-        fill="tonexty", fillcolor="rgba(0,200,5,0.12)",
-        hoverinfo="skip",
-    ))
-
-    # 主曲線（中性灰白，不搶填充的視覺）
+    # ── 主曲線（單色）──
     fig.add_trace(go.Scatter(
         x=times, y=equity, mode="lines", name="淨值",
-        line=dict(color="#c9d1d9", width=2.5, shape="spline", smoothing=0.6),
+        line=dict(color=line_color, width=1.5, shape="linear"),
         hovertemplate="<b>%{x|%m/%d %H:%M}</b><br>$%{y:,.2f}<extra></extra>",
     ))
 
-    # 峰值線（更低調）
-    fig.add_trace(go.Scatter(
-        x=times, y=peak.tolist(), mode="lines", name="峰值",
-        line=dict(color="#21262d", width=1, dash="dot"), opacity=0.3,
-        hoverinfo="skip",
-    ))
-
-    # 最新點（外發光 + 白邊）
-    glow_color = GREEN if is_profit else RED
+    # ── 最新點 ──
     fig.add_trace(go.Scatter(
         x=[times[-1]], y=[equity[-1]], mode="markers",
-        marker=dict(
-            size=10, color=glow_color,
-            line=dict(width=2, color="white"),
-            opacity=0.9,
-        ),
+        marker=dict(size=7, color=line_color, line=dict(width=1.5, color="white"), opacity=0.95),
         hovertemplate=f"<b>當前</b><br>${equity[-1]:,.2f}<extra></extra>",
-    ))
-    # 外圈光暈
-    fig.add_trace(go.Scatter(
-        x=[times[-1]], y=[equity[-1]], mode="markers",
-        marker=dict(size=20, color=glow_color, opacity=0.15),
-        hoverinfo="skip", showlegend=False,
+        showlegend=False,
     ))
 
-    # Y 軸範圍
-    y_min = min(eq_arr) * 0.97
-    y_max = max(max(eq_arr), max(peak)) * 1.03
+    # Layout
+    y_min = float(min(eq_arr)) * 0.97
+    y_max = float(max(max(eq_arr), max(peak))) * 1.03
     fig.update_layout(
         **playout("", 250),
         showlegend=False,
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="#1e222d", font_size=12, font_family="JetBrains Mono"),
+        hoverlabel=dict(bgcolor="#0e1117", bordercolor="#333", font_size=11,
+                        font_family="JetBrains Mono, monospace", font_color="#e6e6e6"),
     )
-    fig.update_yaxes(title_text="$", tickformat=",.2f", gridcolor=BORDER, zerolinecolor=BORDER,
-                     range=[y_min, y_max])
+    fig.update_yaxes(title_text="$", tickformat=",.2f", range=[y_min, y_max])
+    fig.update_xaxes(showgrid=False)
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -203,10 +147,29 @@ def _render_equity_curve(account, recent_trades):
 
     kc1, kc2, kc3, kc4, kc5 = st.columns(5)
     kc1.metric("累計報酬", f"{total_return_pct:+.2f}%")
-    kc2.metric("勝率", f"{win_rate:.1f}% ({wins}W/{losses}L/{be_count}BE)")
+    kc2.metric("勝率", f"{win_rate:.1f}%")
     kc3.metric("平均 RR", f"{avg_rr:.2f}")
     kc4.metric("最大回撤", f"{max_dd:.2f}%")
     kc5.metric("累計手續費", f"${total_fees:,.4f}")
+
+
+def _load_be_marks() -> dict:
+    """讀取 BE 標記檔"""
+    import json
+    be_path = Path(get_project_root()) / "db" / "be_marks.json"
+    try:
+        if be_path.exists():
+            return json.loads(be_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _is_be(symbol: str, direction: str, be_marks: dict) -> bool:
+    """檢查持倉是否已保本（symbol 格式：XRP/USDT:USDT → XRPUSDT.P）"""
+    norm = symbol.replace("/", "").replace(":USDT", "") + ".P"
+    key = f"{norm}|{direction.lower()}"
+    return key in be_marks
 
 
 def _render_account_section(label, account, positions, ex):
@@ -224,7 +187,7 @@ def _render_account_section(label, account, positions, ex):
 
     # 緊湊 header：標題 + 指標一行
     st.markdown(
-        f'<div style="border-top:3px solid {acct_color};background:#161b22;border-radius:8px;padding:10px 14px;margin-bottom:6px">'
+        f'<div style="border-top:3px solid {acct_color};background:#161b22;border-radius:4px;padding:10px 14px;margin-bottom:6px">'
         f'<div style="display:flex;align-items:center;justify-content:space-between">'
         f'<span style="font-weight:800;font-size:0.95rem;color:white">{label}</span>'
         f'<div style="display:flex;gap:16px;font-family:JetBrains Mono,monospace;font-size:0.75rem">'
@@ -243,6 +206,7 @@ def _render_account_section(label, account, positions, ex):
     tab_pos, tab_orders = st.tabs(["持倉", "掛單"])
     with tab_pos:
         if positions:
+            be_marks = _load_be_marks()
             # 自訂 HTML 表格，支持方向標籤和盈虧顏色
             rows_html = ""
             for p in positions:
@@ -255,10 +219,12 @@ def _render_account_section(label, account, positions, ex):
                 pct_val = float(pct_str.replace("%", "").replace("+", ""))
                 pct_c = "pnl-pos" if pct_val > 0 else ("pnl-neg" if pct_val < 0 else "pnl-zero")
 
-                sym_short = str(p.get("商品", "")).replace("/USDT:USDT", "")
+                sym_full = str(p.get("商品", ""))
+                sym_short = sym_full.replace("/USDT:USDT", "")
+                be_tag = '<span class="tag-be">BE</span>' if _is_be(sym_full, d, be_marks) else ""
                 rows_html += (
                     f'<tr style="border-bottom:1px solid #1a1f2b">'
-                    f'<td style="padding:5px 6px">{sym_short}</td>'
+                    f'<td style="padding:5px 6px">{sym_short}{be_tag}</td>'
                     f'<td style="padding:5px 6px">{tag}</td>'
                     f'<td style="padding:5px 6px;text-align:right">{p.get("保證金","")}</td>'
                     f'<td style="padding:5px 6px;text-align:right">{p.get("進場價","")}</td>'
@@ -299,8 +265,10 @@ def _render_account_section(label, account, positions, ex):
                         orders = ex.fetch_open_orders(sym)
                         all_orders.extend(orders)
                     except Exception as _e:
-                        _log.debug(f"靜默異常: {_e}")
-                        pass
+                        if "100410" in str(_e):
+                            st.caption("⏳ API 頻率限制中，稍後刷新")
+                            break
+                        _log.debug(f"掛單查詢: {_e}")
                 if all_orders:
                     # 建立持倉查找表（symbol+side → entry_price, contracts）
                     pos_lookup = {}
@@ -406,6 +374,7 @@ def _show_profit_card():
     data = get_bingx_data(fetch_trades=True)
     h1_account, h1_positions, h1_trades = data[0], data[1], data[2]
     h4_account, h4_positions, h4_trades = data[3], data[4], data[5]
+    # data[6]=h1_ex, data[7]=h4_ex（收益概覽不需要）
 
     if not h1_account:
         st.warning("無法取得帳戶資料")
@@ -465,22 +434,24 @@ def _show_profit_card():
         max_dd = float(np.min((eq_arr - peak) / np.where(peak > 0, peak, 1) * 100))
         total_return_pct = (eq_arr[-1] - initial_capital) / initial_capital * 100 if initial_capital > 0 else 0
 
+        _line_c = "#00e5cc" if is_profit else "#ff5252"
+        _fill_c = "rgba(0,229,204,0.06)" if is_profit else "rgba(255,82,82,0.06)"
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=times, y=equity_line, mode="lines",
-            line=dict(color=pnl_color, width=2.5),
-            fill="tozeroy",
-            fillcolor=f"rgba({'0,200,5' if is_profit else '255,75,75'},0.06)",
+            line=dict(color=_line_c, width=1.5, shape="linear"),
+            fill="tozeroy", fillcolor=_fill_c,
         ))
-        fig.add_hline(y=initial_capital, line_dash="dot", line_color="#333", opacity=0.5)
+        fig.add_hline(y=initial_capital, line_dash="dot", line_color="#333", opacity=0.4)
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor=CARD, plot_bgcolor=CARD,
             margin=dict(l=45, r=10, t=8, b=25),
             height=280,
-            font=dict(color="#555", size=10, family="JetBrains Mono"),
-            xaxis=dict(gridcolor="#1e2530", zerolinecolor="#1e2530", showgrid=False),
-            yaxis=dict(gridcolor="#1e2530", zerolinecolor="#1e2530", tickformat=",.1f", showgrid=True),
+            font=dict(color="#555", size=10, family="JetBrains Mono, monospace"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="#1e2530", showgrid=False),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor="#1e2530",
+                       tickformat=",.1f", showgrid=True, griddash="dot"),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -507,15 +478,86 @@ def _show_profit_card():
     )
 
 
+def _render_pnl_calendar(closed_list):
+    """盈虧日曆：七天一排，點擊展開每日明細"""
+    from datetime import datetime as _dt, timedelta
+    from collections import defaultdict
+
+    if not closed_list:
+        return
+
+    # 按日彙總
+    daily = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "tp": 0, "sl": 0, "be": 0, "items": []})
+    for c in closed_list:
+        try:
+            # time format: "MM/DD HH:MM"
+            day_key = c["time"][:5]  # "MM/DD"
+            d = daily[day_key]
+            d["pnl"] += c["pnl"]
+            d["trades"] += 1
+            if c["exit"] == "TP":
+                d["tp"] += 1
+            elif c["exit"] == "SL":
+                d["sl"] += 1
+            else:
+                d["be"] += 1
+            d["items"].append(c)
+        except Exception:
+            continue
+
+    if not daily:
+        return
+
+    st.markdown(
+        '<div style="font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:1.5px;font-weight:600;margin-bottom:8px">'
+        '盈虧日曆</div>', unsafe_allow_html=True)
+
+    # Sort days
+    sorted_days = sorted(daily.keys())
+
+    # Render in rows of 7
+    for row_start in range(0, len(sorted_days), 7):
+        row_days = sorted_days[row_start:row_start + 7]
+        cols = st.columns(7)
+        for i, day in enumerate(row_days):
+            d = daily[day]
+            pnl = d["pnl"]
+            pnl_color = GREEN if pnl > 0.5 else (RED if pnl < -0.5 else "#555")
+            bg = "rgba(0,200,5,0.06)" if pnl > 0.5 else ("rgba(255,75,75,0.06)" if pnl < -0.5 else "#1a1f2b")
+            border_top = f"border-top:2px solid {pnl_color};" if abs(pnl) > 0.5 else ""
+
+            with cols[i]:
+                with st.expander(f"{day}  ${pnl:+.1f}", expanded=False):
+                    wr = d["tp"] / (d["tp"] + d["sl"]) * 100 if (d["tp"] + d["sl"]) > 0 else 0
+                    tp_pnls = [c["pnl"] for c in d["items"] if c["exit"] == "TP"]
+                    sl_pnls = [c["pnl"] for c in d["items"] if c["exit"] == "SL"]
+                    avg_w = sum(tp_pnls) / len(tp_pnls) if tp_pnls else 0
+                    avg_l = sum(sl_pnls) / len(sl_pnls) if sl_pnls else 0
+                    rr = abs(avg_w / avg_l) if avg_l else 0
+
+                    st.markdown(
+                        f'<div style="font-family:JetBrains Mono,monospace;font-size:0.68rem;line-height:1.8;color:#8b949e">'
+                        f'<div>筆數: <span style="color:#e6e6e6">{d["trades"]}</span></div>'
+                        f'<div>盈虧: <span style="color:{pnl_color}">${pnl:+.2f}</span></div>'
+                        f'<div>勝率: <span style="color:#e6e6e6">{wr:.0f}%</span></div>'
+                        f'<div>RR: <span style="color:#e6e6e6">{rr:.2f}</span></div>'
+                        f'<div style="color:#555;font-size:0.6rem">TP{d["tp"]} SL{d["sl"]} BE{d["be"]}</div>'
+                        f'</div>', unsafe_allow_html=True)
+
+        # Pad remaining columns if less than 7
+        for i in range(len(row_days), 7):
+            cols[i].markdown("")
+
+
 def tab_exec(results, signals):
 
-    # 用 fragment 實現局部自動刷新（不影響其他操作）
     @st.fragment(run_every=60)
     def _live_data():
         data = get_bingx_data(fetch_trades=True)
         h1_account, h1_positions, h1_trades = data[0], data[1], data[2]
         h4_account, h4_positions, h4_trades = data[3], data[4], data[5]
         h1_ex = data[6]
+        h4_ex = data[7] if len(data) > 7 else None
 
         if h1_account is None:
             st.warning("BingX 未設定 API Key"); return
@@ -530,36 +572,76 @@ def tab_exec(results, signals):
         upnl_class = "pnl-pos" if total_upnl > 0 else ("pnl-neg" if total_upnl < 0 else "pnl-zero")
         pnl_border = GREEN if total_upnl > 0 else (RED if total_upnl < 0 else BORDER)
 
-        # 統計 TP/SL/BE — 合併全量數據一次計算
-        _all_closed = build_closed_positions((h1_trades or []) + (h4_trades or []))
+        # 統計 TP/SL — 從 trade_history 讀取（統一來源）
+        import json as _json
+        _all_closed = []
+        _history_dir = Path(__file__).resolve().parent.parent.parent / "db"
+        for _hl in ["h1", "h4"]:
+            _hp = _history_dir / f"trade_history_{_hl}.json"
+            if _hp.exists():
+                try:
+                    with open(_hp, "r", encoding="utf-8") as _hf:
+                        for _ht in _json.load(_hf):
+                            reason = _ht.get("close_reason", "")
+                            pnl = _ht.get("realized_pnl", 0)
+                            if "TP" in reason or "tp" in reason or "all_tp" in reason:
+                                exit_type = "TP"
+                            elif pnl < 0:
+                                exit_type = "SL"
+                            else:
+                                exit_type = "BE"
+                            _ht["exit"] = exit_type
+                            # 補 time 欄位（MM/DD HH:MM 格式）
+                            if "time" not in _ht or not _ht["time"]:
+                                from datetime import datetime as _dtc
+                                for _tf in [_ht.get("closed_at", ""), _ht.get("opened_at", "")]:
+                                    if _tf and str(_tf).strip():
+                                        try:
+                                            _ts = str(_tf).strip()[:19]
+                                            _dt_obj = _dtc.strptime(_ts, "%Y-%m-%d %H:%M:%S")
+                                            _ht["time"] = _dt_obj.strftime("%m/%d %H:%M")
+                                            break
+                                        except Exception:
+                                            try:
+                                                _dt_obj = _dtc.fromisoformat(_ts.replace("Z", "+00:00"))
+                                                _ht["time"] = _dt_obj.strftime("%m/%d %H:%M")
+                                                break
+                                            except Exception:
+                                                pass
+                            # 確保 fee 和 pnl 欄位
+                            if "fee" not in _ht:
+                                _ht["fee"] = 0
+                            if "pnl" not in _ht:
+                                _ht["pnl"] = pnl
+                            _all_closed.append(_ht)
+                except Exception:
+                    pass
         _tp_count = sum(1 for c in _all_closed if c["exit"] == "TP")
         _sl_count = sum(1 for c in _all_closed if c["exit"] == "SL")
-        _be_count = sum(1 for c in _all_closed if c["exit"] == "BE")
 
         st.markdown(
             f'<div style="display:flex;gap:12px;margin-bottom:8px">'
-            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:10px;padding:12px 16px">'
+            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:4px;padding:12px 16px">'
             f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">總餘額</div>'
             f'<div style="font-size:1.1rem;font-family:JetBrains Mono,monospace;color:#e6e6e6;margin-top:4px">${total_balance:.2f}</div></div>'
-            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:10px;padding:12px 16px">'
+            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:4px;padding:12px 16px">'
             f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">總淨值</div>'
             f'<div style="font-size:1.3rem;font-family:JetBrains Mono,monospace;color:white;font-weight:800;margin-top:4px">${total_equity:.2f}</div></div>'
-            f'<div style="flex:0.6;background:#1e222d;border:1px solid #30363d;border-radius:10px;padding:12px 16px">'
-            f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">總持倉</div>'
-            f'<div style="font-size:1.1rem;font-family:JetBrains Mono,monospace;color:#e6e6e6;margin-top:4px">{total_positions}</div></div>'
-            # TP/SL/BE 統計
-            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:10px;padding:12px 16px">'
-            f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">TP / SL / BE</div>'
+            f'<div style="flex:0.8;background:#1e222d;border:1px solid #30363d;border-radius:4px;padding:12px 16px">'
+            f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">持倉 / 總開倉</div>'
+            f'<div style="font-size:1.1rem;font-family:JetBrains Mono,monospace;color:#e6e6e6;margin-top:4px">'
+            f'{total_positions} <span style="color:#555;font-size:0.8rem">/ {_tp_count + _sl_count + total_positions}</span></div></div>'
+            # TP/SL 統計
+            f'<div style="flex:1;background:#1e222d;border:1px solid #30363d;border-radius:4px;padding:12px 16px">'
+            f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">TP / SL</div>'
             f'<div style="font-size:1.1rem;font-family:JetBrains Mono,monospace;margin-top:4px">'
             f'<span style="color:{GREEN}">{_tp_count}</span>'
             f'<span style="color:#444"> / </span>'
             f'<span style="color:{RED}">{_sl_count}</span>'
-            f'<span style="color:#444"> / </span>'
-            f'<span style="color:{BLUE}">{_be_count}</span>'
             f'</div></div>'
             # 總浮盈
             f'<div style="flex:1;background:{"rgba(0,200,5,0.05)" if total_upnl > 0 else ("rgba(255,75,75,0.05)" if total_upnl < 0 else "#1e222d")};'
-            f'border:1px solid #30363d;border-top:2px solid {pnl_border};border-radius:10px;padding:12px 16px">'
+            f'border:1px solid #30363d;border-top:2px solid {pnl_border};border-radius:4px;padding:12px 16px">'
             f'<div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:1px">總浮盈</div>'
             f'<div class="{upnl_class}" style="font-size:1.3rem;margin-top:4px">${total_upnl:+.2f}</div>'
             f'</div>'
@@ -575,39 +657,33 @@ def tab_exec(results, signals):
         st.divider()
 
         # ── 資金曲線 + 今日概況 ──
-        all_trades = (h1_trades or []) + (h4_trades or [])
-        all_trades.sort(key=lambda x: x.get("timestamp", 0))
-
+        # 統一用 trade_history 作為資金曲線來源
         col_curve, col_today = st.columns([7, 3])
 
         with col_curve:
-            curve_account = {"balance": total_balance, "equity": total_equity, "initial_capital": 200.0}
-            curve_trades = all_trades
-            if curve_trades:
-                _render_equity_curve(curve_account, curve_trades)
+            _init_cap = 300.0  # H1 $150 + H4 $150
+            curve_account = {"balance": total_balance, "equity": total_equity, "initial_capital": _init_cap}
+            # 從 trade_history 構建 closed list
+            curve_closed = [c for c in _all_closed if c.get("time") or c.get("closed_at") or c.get("opened_at")]
+            if curve_closed:
+                _render_equity_curve(curve_account, curve_closed, paper_mode=True)
+            else:
+                kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+                kc1.metric("累計報酬", "+0.00%")
+                kc2.metric("勝率", "0.0%")
+                kc3.metric("平均 RR", "0.00")
+                kc4.metric("最大回撤", "0.00%")
+                kc5.metric("累計手續費", "$0.0000")
 
         with col_today:
             st.markdown("**今日概況**")
             from datetime import datetime as _dt
-            today = _dt.utcnow().strftime("%Y-%m-%d")
-            today_count = 0
-            total_fee = 0.0
-            for t in all_trades:
-                try:
-                    ts = _dt.fromtimestamp(t.get("timestamp", 0) / 1000)
-                    if ts.strftime("%Y-%m-%d") != today:
-                        continue
-                    fee_obj = t.get("fee") or {}
-                    fee = float(fee_obj.get("cost", 0)) if isinstance(fee_obj, dict) else 0
-                    total_fee += abs(fee)
-                    today_count += 1
-                except Exception as _e:
-                    _log.debug(f"靜默異常: {_e}")
-                    continue
-
+            today_str = _dt.now().strftime("%m/%d")
+            today_closed = [c for c in _all_closed if (c.get("time", "") or "").startswith(today_str)]
+            today_count = len(today_closed)
+            total_fee = sum(c.get("fee", 0) for c in today_closed)
             st.metric("成交筆數", today_count)
             st.metric("累計手續費", f"${total_fee:.4f}")
-            st.metric("初始資金", "$200")
 
         st.divider()
 
@@ -617,11 +693,7 @@ def tab_exec(results, signals):
             with col_h1:
                 _render_account_section("H1 主帳戶", h1_account, h1_positions, h1_ex)
             with col_h4:
-                import ccxt as _ccxt
-                from src.config import load_config as _lc
-                _bcfg = _lc().get("bingx", {})
-                _h4_ex = _ccxt.bingx({"apiKey": _bcfg["sub_api_key"], "secret": _bcfg["sub_api_secret"], "options": {"defaultType": "swap"}}) if _bcfg.get("sub_api_key") else None
-                _render_account_section("H4 子帳戶", h4_account, h4_positions, _h4_ex)
+                _render_account_section("H4 子帳戶", h4_account, h4_positions, h4_ex)
         else:
             _render_account_section("H1 主帳戶", h1_account, h1_positions, h1_ex)
 

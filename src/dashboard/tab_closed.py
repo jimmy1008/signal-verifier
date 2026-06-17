@@ -12,6 +12,7 @@ from src.dashboard.helpers import (
     GREEN, RED, BLUE, GRAY,
     get_bingx_data, build_closed_positions, get_project_root,
 )
+from src.dashboard.tab_operations import _render_pnl_calendar
 
 _log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def tab_closed(results, signals):
         st.warning("BingX 未設定 API Key")
         return
 
-    all_closed = build_closed_positions((h1_trades or []) + (h4_trades or []))
+    all_closed = build_closed_positions(h1_trades or []) + build_closed_positions(h4_trades or [])
     total_pnl = sum(c["pnl"] for c in all_closed)
     total_fee = sum(c["fee"] for c in all_closed)
     tp_count = sum(1 for c in all_closed if c["exit"] == "TP")
@@ -85,7 +86,7 @@ def tab_closed(results, signals):
                 f'</tr>'
             )
         st.markdown(f"""
-        <div style="max-height:calc(100vh - 220px);overflow-y:auto">
+        <div style="max-height:360px;overflow-y:auto">
         <table style="width:100%;border-collapse:collapse;font-family:'JetBrains Mono','Consolas',monospace;font-size:0.78rem">
         <thead><tr style="border-bottom:1px solid #333;color:#666;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.8px">
             <th style="padding:6px;text-align:left">平倉時間</th>
@@ -136,10 +137,15 @@ def tab_closed(results, signals):
                 from datetime import datetime as _dtl
                 last_update = _dtl.now().strftime("%H:%M:%S")
                 st.markdown(
-                    f'<div class="log-box">{log_html}</div>'
+                    f'<div class="log-box" style="height:360px">{log_html}</div>'
                     f'<div style="text-align:right;font-size:0.55rem;color:#444;margin-top:2px">更新 {last_update}</div>',
                     unsafe_allow_html=True)
             except Exception:
                 st.caption("無法讀取")
         else:
             st.caption("尚無 Log")
+
+    st.divider()
+
+    # ── 盈虧日曆 ──
+    _render_pnl_calendar(all_closed)

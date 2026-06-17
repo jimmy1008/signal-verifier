@@ -62,21 +62,24 @@ def simulate_trade(
     if risk == 0:
         return _not_triggered(signal.id, "zero risk (entry == sl)")
 
+    # SL 距離 < 0.1% → 跳過（與實盤一致）
+    sl_dist_pct = abs(entry - sl) / entry if entry > 0 else 0
+    if sl_dist_pct < 0.001:
+        return _not_triggered(signal.id, f"SL distance {sl_dist_pct:.4%} < 0.1%")
+
     tps = _get_tps(signal)
 
-    # ── Phase 1: 找進場點 ──
+    # ── Phase 1: 找進場點（K 線觸及 entry 視為市價成交）──
     entry_time = None
     entry_candle_idx = None
 
     for i, c in enumerate(candles):
-        # 檢查過期
         bars_elapsed = i + 1
         hours_elapsed = (c.open_time - candles[0].open_time).total_seconds() / 3600
 
         if bars_elapsed > config.signal_expiry_bars or hours_elapsed > config.signal_expiry_hours:
             return _not_triggered(signal.id, f"expired after {bars_elapsed} bars / {hours_elapsed:.0f}h")
 
-        # 檢查是否觸及 entry
         if _price_touched(c, entry):
             entry_time = c.open_time
             entry_candle_idx = i

@@ -9,6 +9,7 @@ from __future__ import annotations
 from src.parsers.base import BaseParser
 from src.parsers.default_parser import DefaultParser
 from src.parsers.crt_sniper_parser import CrtSniperParser
+from src.parsers.vip1000x_parser import Vip1000xParser
 
 # 所有可用 parser
 _REGISTRY: dict[str, BaseParser] = {}
@@ -31,3 +32,4 @@ def list_parsers() -> list[str]:
 # 預設註冊
 register_parser(DefaultParser())
 register_parser(CrtSniperParser())
+register_parser(Vip1000xParser())

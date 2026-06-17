@@ -166,91 +166,264 @@ def tab_edge(results, signals):
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
-def tab_capital(results, signals):
-    risk_d = st.session_state.get("risk", 1.0)
-    c1, c2, c3, c4 = st.columns(4)
-    cap_init = c1.number_input("初始資金 $", value=10000, step=1000)
-    risk_v = c2.number_input("風險 %", value=risk_d, step=0.1)
-    cost = c3.number_input("成本 (R)", value=0.10, step=0.01)
-    mc_n = c4.number_input("模擬次數", value=100, step=50, min_value=10)
+def _fmt_money(v):
+    """格式化金額"""
+    if abs(v) >= 1_000_000_000:
+        return f"${v / 1_000_000_000:,.1f}B"
+    if abs(v) >= 1_000_000:
+        return f"${v / 1_000_000:,.1f}M"
+    if abs(v) >= 10_000:
+        return f"${v / 1_000:,.1f}K"
+    return f"${v:,.0f}"
 
-    triggered_r = [r.pnl_r - cost for r in results if r.triggered]
+
+def _sim_equity(triggered_r, cap_init, risk_pct, friction=0.001, cap_max=50_000_000):
+    """模擬資金曲線（含滑價摩擦 + 容量上限），回傳 % 收益序列"""
+    eq_pct = [0.0]
+    c = float(cap_init)
+    peak = c
+    max_dd = 0.0
+    for p in triggered_r:
+        scale_friction = friction * (1 + max(0, c - cap_init) / cap_init)
+        pnl = p - scale_friction if p > 0 else p
+        risk_amt = min(c, cap_max) * risk_pct / 100
+        c += pnl * risk_amt
+        if c < 1:
+            c = 1
+        eq_pct.append((c - cap_init) / cap_init * 100)
+        if c > peak:
+            peak = c
+        dd = (peak - c) / peak if peak > 0 else 0
+        if dd > max_dd:
+            max_dd = dd
+    return eq_pct, c, max_dd
+
+
+def tab_capital(results, signals):
+    triggered = [r for r in results if r.triggered]
+    triggered_r = [r.pnl_r for r in triggered]
+    n_trades = len(triggered_r)
+
     if not triggered_r:
         st.info("無觸發交易")
         return
 
-    adj = [
-        TradeResult(
-            signal_id=r.signal_id, triggered=r.triggered, entry_time=r.entry_time,
-            exit_time=r.exit_time, exit_reason=r.exit_reason, max_tp_hit=r.max_tp_hit,
-            pnl_r=(r.pnl_r - cost) if r.triggered else 0,
-        )
-        for r in results
-    ]
-    cap = run_simulation(adj, float(cap_init), risk_v / 100)
-
-    vmap = {
-        "viable": (GREEN, "可交易"),
-        "untradeable": (RED, "不可交易"),
-        "psychologically_untradeable": (YELLOW, "心理不可承受"),
-        "no_edge": (RED, "無優勢"),
-    }
-    vc, vt = vmap.get(cap.verdict, (GRAY, "?"))
-
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("最終資金", f"${cap.final_capital:,.0f}")
-    mc2.metric("報酬", f"{cap.total_return_pct:+.1%}")
-    mc3.metric("最大回撤", f"{cap.max_drawdown_pct:.1%}")
-    mc4.metric("連敗", cap.max_losing_streak)
-    mc5.metric("谷底", f"{cap.min_capital_ratio:.0%}")
-
-    # Monte Carlo
-    rng = np.random.default_rng(42)
-    r_arr = np.array(triggered_r)
-    n_t = len(r_arr)
-
-    fig = go.Figure()
-    finals = []
-    bust = 0
-
-    for i in range(int(mc_n)):
-        shuf = rng.choice(r_arr, n_t, replace=True)
-        eq = [float(cap_init)]
-        c = float(cap_init)
-        for p in shuf:
-            c *= (1 + p * risk_v / 100)
-            eq.append(c)
-        finals.append(c)
-        if c < cap_init * 0.5:
-            bust += 1
-        color = GREEN if c >= cap_init else RED
-        fig.add_trace(go.Scatter(
-            x=list(range(len(eq))), y=eq, mode="lines",
-            line=dict(width=0.5, color=color), opacity=0.08, showlegend=False,
-        ))
-
-    fig.add_hline(y=float(np.median(finals)), line_dash="dash", line_color=YELLOW,
-                  annotation_text=f"中位數 ${np.median(finals):,.0f}")
-    fig.add_hline(y=cap_init, line_dash="dot", line_color=GRAY, annotation_text="初始")
-    fig.update_layout(**playout(f"蒙地卡羅 {int(mc_n)} 次模擬", 320))
-    st.plotly_chart(fig, use_container_width=True)
-
-    sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric("破產機率", f"{bust / mc_n * 100:.1f}%")
-    sc2.metric("中位數", f"${np.median(finals):,.0f}")
-    sc3.metric("最佳", f"${np.max(finals):,.0f}")
-    sc4.metric("最差", f"${np.min(finals):,.0f}")
-
     m = compute_metrics(results)
-    if m.avg_rr > 0 and m.win_rate > 0:
-        kelly = m.win_rate - (1 - m.win_rate) / m.avg_rr
-        kelly_pct = max(0, kelly * 100)
-        st.markdown(f"""
-        <div class="kelly-box">
-            <b>Kelly 準則</b><br>
-            最佳比例: <b>{kelly_pct:.1f}%</b> | 保守建議 (Half Kelly): <b>{kelly_pct / 2:.1f}%</b>
-        </div>
-        """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════
+    # 1. 頂部控制列
+    # ══════════════════════════════════════════════
+    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1.2, 1.2, 1.2, 2])
+    cap_init = ctrl1.number_input("初始資金 $", value=1000, step=100)
+    pessimistic = ctrl2.toggle("悲觀模式", value=False, help="勝率 -10%，RR ×0.8")
+
+    if pessimistic:
+        ctrl2.caption("WR -10% | RR ×0.8")
+
+    ctrl4.markdown(
+        f'<div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px 14px;'
+        f'font-family:JetBrains Mono,monospace;font-size:0.7rem;display:flex;gap:20px;align-items:center">'
+        f'<span style="color:#888">交易 <span style="color:#e6e6e6;font-weight:700">{n_trades:,}</span> 筆</span>'
+        f'<span style="color:#888">勝率 <span style="color:#e6e6e6;font-weight:700">{m.win_rate:.1%}</span></span>'
+        f'<span style="color:#888">RR <span style="color:#e6e6e6;font-weight:700">{m.avg_rr:.2f}</span></span>'
+        f'<span style="color:#888">EV <span style="color:{GREEN if m.expectancy > 0 else RED};font-weight:700">'
+        f'{m.expectancy:+.4f}R</span></span>'
+        f'</div>', unsafe_allow_html=True)
+
+    # 悲觀修正
+    if pessimistic:
+        rng = np.random.default_rng(123)
+        adj_r = [p * 0.8 if p > 0 else p for p in triggered_r]
+        n_extra = int(len(adj_r) * 0.1)
+        adj_r.extend([-1.0] * n_extra)
+        adj_r_arr = np.array(adj_r)
+        rng.shuffle(adj_r_arr)
+        sim_r = adj_r_arr.tolist()
+    else:
+        sim_r = triggered_r
+
+    # ══════════════════════════════════════════════
+    # 2. 核心區：曲線 + 數據矩陣（7:3）
+    # ══════════════════════════════════════════════
+    col_chart, col_matrix = st.columns([7, 3])
+
+    risk_levels = [0.5, 1.0, 2.0, 3.0, 5.0]
+    risk_colors = ["#555", BLUE, GREEN, YELLOW, RED]
+    summary_rows = []
+    dd_for_chart = None
+
+    with col_chart:
+        fig = make_subplots(rows=2, cols=1, row_heights=[0.75, 0.25],
+                            shared_xaxes=True, vertical_spacing=0.03)
+
+        for risk_pct, color in zip(risk_levels, risk_colors):
+            eq_pct, final_c, max_dd = _sim_equity(sim_r, cap_init, risk_pct)
+            ret_pct = (final_c - cap_init) / cap_init * 100
+            width = 2.5 if risk_pct == 2.0 else 1
+
+            fig.add_trace(go.Scatter(
+                x=list(range(len(eq_pct))), y=eq_pct, mode="lines",
+                name=f"{risk_pct}%", line=dict(color=color, width=width),
+                hovertemplate=f"{risk_pct}% | " + "%{y:+,.1f}%<extra></extra>",
+            ), row=1, col=1)
+
+            if risk_pct == 2.0:
+                eq_abs = [cap_init * (1 + p / 100) for p in eq_pct]
+                eq_arr = np.array(eq_abs)
+                pk = np.maximum.accumulate(eq_arr)
+                dd_for_chart = np.where(pk > 0, (eq_arr - pk) / pk * 100, 0)
+
+            status = "RUIN" if max_dd > 0.5 else "OK"
+            summary_rows.append({
+                "risk": risk_pct, "final": final_c, "ret": ret_pct,
+                "dd": max_dd, "status": status, "color": color,
+            })
+
+        # 回撤子圖
+        if dd_for_chart is not None:
+            fig.add_trace(go.Scatter(
+                x=list(range(len(dd_for_chart))), y=dd_for_chart.tolist(), mode="lines",
+                line=dict(color=RED, width=1), fill="tozeroy",
+                fillcolor="rgba(255,75,75,0.12)", showlegend=False,
+                hovertemplate="DD: %{y:.1f}%<extra></extra>",
+            ), row=2, col=1)
+            fig.add_hline(y=-50, line_dash="dash", line_color=RED, opacity=0.6, row=2, col=1,
+                          annotation_text="RUIN", annotation_position="bottom right",
+                          annotation_font_color=RED, annotation_font_size=9)
+
+        fig.add_hline(y=0, line_dash="dot", line_color="#333", opacity=0.3, row=1, col=1)
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor=BG, plot_bgcolor=BG,
+            margin=dict(l=45, r=10, t=10, b=30), height=380,
+            font=dict(color=GRAY, size=10, family="JetBrains Mono, monospace"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=9)),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#0e1117", bordercolor="#333", font_size=10,
+                            font_family="JetBrains Mono, monospace", font_color="#e6e6e6"),
+        )
+        fig.update_yaxes(title_text="收益 %", gridcolor="rgba(255,255,255,0.04)", griddash="dot", row=1, col=1)
+        fig.update_yaxes(title_text="DD%", gridcolor="rgba(255,255,255,0.04)", griddash="dot", row=2, col=1)
+        fig.update_xaxes(showgrid=False, row=1, col=1)
+        fig.update_xaxes(title_text=f"交易筆數（{len(sim_r):,}）", showgrid=False, row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_matrix:
+        # HTML 數據矩陣
+        rows_html = ""
+        for row in summary_rows:
+            status_style = (
+                f'background:rgba(255,75,75,0.2);color:{RED};font-weight:800'
+                if row["status"] == "RUIN"
+                else f'color:{GREEN}'
+            )
+            dd_color = RED if row["dd"] > 0.3 else (YELLOW if row["dd"] > 0.15 else "#888")
+            ret_color = GREEN if row["ret"] > 0 else RED
+            rows_html += (
+                f'<tr style="border-bottom:1px solid #1a1f2b">'
+                f'<td style="padding:6px 8px"><span style="color:{row["color"]};font-weight:700">{row["risk"]}%</span></td>'
+                f'<td style="padding:6px 8px;text-align:right">{_fmt_money(row["final"])}</td>'
+                f'<td style="padding:6px 8px;text-align:right;color:{ret_color}">{row["ret"]:+,.0f}%</td>'
+                f'<td style="padding:6px 8px;text-align:right;color:{dd_color}">{row["dd"]:.0%}</td>'
+                f'<td style="padding:6px 8px;text-align:center;{status_style}">{row["status"]}</td>'
+                f'</tr>'
+            )
+        st.markdown(
+            f'<table style="width:100%;border-collapse:collapse;font-family:JetBrains Mono,monospace;font-size:0.7rem;margin-top:4px">'
+            f'<thead><tr style="border-bottom:1px solid #333;color:#555;font-size:0.55rem;text-transform:uppercase;letter-spacing:0.5px">'
+            f'<th style="padding:5px 8px;text-align:left">風險</th>'
+            f'<th style="padding:5px 8px;text-align:right">最終</th>'
+            f'<th style="padding:5px 8px;text-align:right">報酬</th>'
+            f'<th style="padding:5px 8px;text-align:right">DD</th>'
+            f'<th style="padding:5px 8px;text-align:center">狀態</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table>',
+            unsafe_allow_html=True,
+        )
+
+        # Kelly 摘要
+        if m.avg_rr > 0 and m.win_rate > 0:
+            kelly = m.win_rate - (1 - m.win_rate) / m.avg_rr
+            kelly_pct = max(0, kelly * 100)
+            ev_c = GREEN if m.expectancy > 0 else RED
+            st.markdown(
+                f'<div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:10px 12px;'
+                f'margin-top:12px;font-family:JetBrains Mono,monospace;font-size:0.65rem;color:#888">'
+                f'<div style="margin-bottom:4px">Kelly <span style="color:white;font-weight:700">{kelly_pct:.1f}%</span>'
+                f' → Half <span style="color:{GREEN};font-weight:700">{kelly_pct/2:.1f}%</span></div>'
+                f'<div>EV <span style="color:{ev_c};font-weight:700">{m.expectancy:+.4f}R</span>'
+                f' <span style="color:#444">| 含 0.1% 摩擦</span></div>'
+                f'</div>', unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════
+    # 3. 底部診斷區：三欄並排
+    # ══════════════════════════════════════════════
+    st.divider()
+
+    col_surv, col_sens, col_heat = st.columns(3)
+
+    # ── 連虧生存率 ──
+    with col_surv:
+        streaks = [5, 10, 15, 20, 25]
+        survival = [100 * ((1 - 2.0 / 100) ** s) for s in streaks]
+
+        fig_s = go.Figure()
+        colors_s = [GREEN if v > 80 else (YELLOW if v > 50 else RED) for v in survival]
+        fig_s.add_trace(go.Bar(
+            x=[f"{s}" for s in streaks], y=survival,
+            marker_color=colors_s, text=[f"{v:.0f}%" for v in survival],
+            textposition="outside", textfont=dict(size=9),
+        ))
+        fig_s.add_hline(y=50, line_dash="dash", line_color=RED, opacity=0.5)
+        fig_s.update_layout(**playout("連虧生存率 (2%)", 220), showlegend=False)
+        fig_s.update_yaxes(title_text="%", range=[0, 105])
+        fig_s.update_xaxes(title_text="連虧次數")
+        st.plotly_chart(fig_s, use_container_width=True)
+
+    # ── 勝率衰減敏感度 ──
+    with col_sens:
+        wr_offsets = [-0.10, -0.05, -0.03, 0, +0.03, +0.05]
+        exp_values = []
+        for offset in wr_offsets:
+            wr = max(0, min(1, m.win_rate + offset))
+            exp_values.append(wr * m.avg_win_r + (1 - wr) * m.avg_loss_r)
+
+        colors_d = [GREEN if v > 0 else RED for v in exp_values]
+        labels = [f"{o:+.0%}" if o != 0 else "NOW" for o in wr_offsets]
+
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(
+            x=labels, y=exp_values, marker_color=colors_d,
+            text=[f"{v:+.3f}" for v in exp_values],
+            textposition="outside", textfont=dict(size=9),
+        ))
+        fig_d.add_hline(y=0, line_color="#555", line_width=1)
+        fig_d.update_layout(**playout("勝率衰減 → EV", 220), showlegend=False)
+        fig_d.update_yaxes(title_text="EV (R)")
+        fig_d.update_xaxes(title_text="勝率偏移")
+        st.plotly_chart(fig_d, use_container_width=True)
+
+    # ── 參數穩定性熱力圖 ──
+    with col_heat:
+        wr_range = np.arange(0.10, 0.50, 0.02)
+        rr_range = np.arange(0.5, 5.5, 0.25)
+        hmap = np.array([[wr * rr - (1 - wr) for wr in wr_range] for rr in rr_range])
+
+        fig_h = go.Figure(go.Heatmap(
+            z=hmap, x=[f"{w:.0%}" for w in wr_range], y=[f"{r:.1f}" for r in rr_range],
+            colorscale=[[0, RED], [0.4, "#1a1a2e"], [0.5, "#333"], [0.6, "#1a2e1a"], [1, GREEN]],
+            zmin=-1, zmax=2, zmid=0, colorbar=dict(title="EV", len=0.8, thickness=10),
+            hovertemplate="WR:%{x} RR:%{y}<br>EV:%{z:.3f}R<extra></extra>",
+        ))
+        fig_h.add_trace(go.Scatter(
+            x=[f"{m.win_rate:.0%}"], y=[f"{m.avg_rr:.1f}"],
+            mode="markers+text", text=["YOU"],
+            textposition="top center", textfont=dict(color="white", size=10, family="JetBrains Mono"),
+            marker=dict(size=12, color="white", symbol="circle-open", line=dict(width=2)),
+            showlegend=False,
+        ))
+        fig_h.update_layout(**playout("EV 地圖", 220), showlegend=False)
+        fig_h.update_xaxes(title_text="勝率", tickangle=-45, dtick=4)
+        fig_h.update_yaxes(title_text="RR")
+        st.plotly_chart(fig_h, use_container_width=True)
 
 
 def tab_verdict(results, signals):

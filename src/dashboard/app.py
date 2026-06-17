@@ -21,6 +21,7 @@ from src.dashboard.tab_operations import tab_exec, _show_profit_card
 from src.dashboard.tab_signals import tab_signals
 from src.dashboard.tab_closed import tab_closed
 from src.dashboard.tab_research import tab_research
+from src.dashboard.tab_calculator import tab_calculator
 
 st.set_page_config(page_title="Signal Verifier", page_icon="SV", layout="wide")
 
@@ -40,16 +41,24 @@ def _inject_css():
     .stDeployButton {{ display: none !important; }}
     [data-testid="collapsedControl"] {{ display: none !important; }}
     [data-testid="stSidebar"] {{ transform: none !important; }}
-    header[data-testid="stHeader"] {{ background: transparent !important; }}
+    header[data-testid="stHeader"] {{
+        background: transparent !important;
+        pointer-events: none;
+        height: 0 !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        position: absolute !important;
+    }}
+    header[data-testid="stHeader"] * {{ pointer-events: none; }}
 
 
     /* === Metric 卡片 === */
     [data-testid="stMetric"] {{
         background: #1e222d;
         border: 1px solid #30363d;
-        border-radius: 10px;
+        border-radius: 4px;
         padding: 12px 16px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.4);
         transition: border-color 0.3s ease;
     }}
     [data-testid="stMetricLabel"] {{
@@ -94,6 +103,15 @@ def _inject_css():
         border-radius: 4px;
         font-weight: 700;
         font-size: 0.7rem;
+    }}
+    .tag-be {{
+        background: rgba(41,98,255,0.15);
+        color: {BLUE};
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-weight: 700;
+        font-size: 0.6rem;
+        margin-left: 4px;
     }}
 
     /* === 保證金進度條 === */
@@ -202,7 +220,7 @@ def _inject_css():
     .verdict-card {{
         text-align: center;
         padding: 24px;
-        border-radius: 12px;
+        border-radius: 4px;
         font-size: 1.8rem;
         font-weight: 800;
         margin-bottom: 12px;
@@ -215,7 +233,7 @@ def _inject_css():
     .kelly-box {{
         background: #1e222d;
         border: 1px solid {BLUE};
-        border-radius: 10px;
+        border-radius: 4px;
         padding: 14px 18px;
         margin-top: 8px;
     }}
@@ -324,6 +342,34 @@ def _inject_css():
 _inject_css()
 
 
+def _render_changelog_html(md_text: str) -> str:
+    """Markdown 變動日誌轉 HTML（輕量，不依賴外部庫）"""
+    import re
+    lines = md_text.split("\n")
+    html = []
+    for line in lines:
+        line = line.rstrip()
+        if line.startswith("# "):
+            html.append(f'<h2 style="color:#e6e6e6;font-size:1rem;margin:0 0 12px 0;border-bottom:1px solid #21262d;padding-bottom:8px">{line[2:]}</h2>')
+        elif line.startswith("## "):
+            html.append(f'<h3 style="color:#58a6ff;font-size:0.85rem;margin:16px 0 8px 0">{line[3:]}</h3>')
+        elif line.startswith("### "):
+            html.append(f'<h4 style="color:#c9d1d9;font-size:0.78rem;margin:12px 0 4px 0">{line[4:]}</h4>')
+        elif line.startswith("#### "):
+            html.append(f'<div style="color:#d2a8ff;font-size:0.74rem;margin:8px 0 4px 0;font-weight:700">{line[5:]}</div>')
+        elif line.startswith("---"):
+            html.append('<hr style="border:none;border-top:1px solid #21262d;margin:12px 0">')
+        elif line.startswith("- "):
+            content = line[2:]
+            content = re.sub(r'\*\*(.+?)\*\*', r'<span style="color:#e6e6e6;font-weight:700">\1</span>', content)
+            content = re.sub(r'`(.+?)`', r'<code style="background:#161b22;padding:1px 4px;border-radius:3px;color:#7ee787">\1</code>', content)
+            html.append(f'<div style="padding-left:12px;margin:2px 0">• {content}</div>')
+        elif line.strip():
+            content = re.sub(r'\*\*(.+?)\*\*', r'<span style="color:#e6e6e6;font-weight:700">\1</span>', line)
+            html.append(f'<div style="margin:2px 0">{content}</div>')
+    return "\n".join(html)
+
+
 # ── Sidebar ──────────────────────────────────────────
 
 def sidebar():
@@ -333,36 +379,58 @@ def sidebar():
     runs = s.query(BacktestRunORM).order_by(BacktestRunORM.created_at.desc()).all()
     s.close()
 
+    results, signals = None, None
     if not runs:
-        st.sidebar.warning("尚無回測資料")
-        return None, None
+        st.sidebar.caption("尚無回測資料")
+    else:
+        nm = {
+            "cfd_best": "CRT CFD",
+            "crypto_best": "CRT Crypto",
+        }
+        opts = {nm.get(r.config_name, r.config_name): r.id for r in runs}
+        sel = st.sidebar.selectbox("信號源", list(opts.keys()), label_visibility="collapsed")
+        results = clean_results(load_results(opts[sel]))
+        signals = load_signals()
 
-    nm = {
-        "cfd_best": "外匯 / CFD",
-        "crypto_best": "加密貨幣",
-    }
-    opts = {nm.get(r.config_name, r.config_name): r.id for r in runs}
-    sel = st.sidebar.selectbox("回測組", list(opts.keys()), label_visibility="collapsed")
-    results = load_results(opts[sel])
-    signals = load_signals()
-
-    if results:
-        m = compute_metrics(clean_results(results))
-        a, b = st.sidebar.columns(2)
-        a.metric("期望值", f"{m.expectancy:+.4f}R")
-        b.metric("勝率", f"{m.win_rate:.1%}")
-        a.metric("累積 R", f"{m.total_r:+.1f}")
-        b.metric("信號數", m.total_signals)
+        if results:
+            m = compute_metrics(results)
+            a, b = st.sidebar.columns(2)
+            a.metric("期望值", f"{m.expectancy:+.4f}R")
+            b.metric("勝率", f"{m.win_rate:.1%}")
+            a.metric("累積 R", f"{m.total_r:+.1f}")
+            b.metric("信號數", m.total_signals)
 
     st.sidebar.divider()
     with st.sidebar.expander("策略規則"):
-        st.caption("風險: 2% / 筆")
-        st.caption("TP1: 不出場")
-        st.caption("TP2: SL 移到 Entry（保本含手續費）")
-        st.caption("TP3: 出 50%")
-        st.caption("TP4: 出 50%（全平）")
+        st.caption("H1 風險: 1% / H4 風險: 1%")
+        st.caption("100% 直接開倉（不加倉）")
+        st.caption("TP2 保本: SL 移到 Entry（不移動止盈）")
+        st.caption("CRT Sweep 過濾: 只跟符合 sweep 的信號")
+        st.caption("TP1 RR≥1: 45/30/15/10 分批出場")
+        st.caption("TP1 RR<1: TP3 出 50% / TP4 出 50%")
         st.caption("SL 距離 < 0.1%: 不下單")
-        st.caption("最大持倉: 無上限")
+        st.caption("模擬模式: H1/H4 各 $500")
+
+    # 策略變動日誌
+    @st.dialog("策略變動日誌", width="large")
+    def _show_changelog():
+        from pathlib import Path as _P
+        _cl_path = _P(__file__).resolve().parent.parent.parent / "STRATEGY_CHANGELOG.md"
+        if _cl_path.exists():
+            _cl_text = _cl_path.read_text(encoding="utf-8")
+            # 渲染成黑底 note 樣式
+            st.markdown(
+                f'<div style="background:#0a0d12;border:1px solid #21262d;border-radius:4px;'
+                f'padding:20px 24px;font-family:JetBrains Mono,Consolas,monospace;font-size:0.72rem;'
+                f'line-height:1.8;color:#8b949e;max-height:70vh;overflow-y:auto">'
+                f'{_render_changelog_html(_cl_text)}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("尚無變動日誌")
+
+    if st.sidebar.button("策略變動日誌", use_container_width=True):
+        _show_changelog()
 
     st.sidebar.divider()
     st.sidebar.markdown("##### Broker")
@@ -444,11 +512,11 @@ def main():
         r, s = None, None
 
     if not r:
-        st.warning("請先執行回測（或 sidebar 載入失敗）")
+        pass  # 無回測資料時不顯示警告，執行總覽仍正常運作
 
     # tabs 永遠渲染（不管 sidebar 是否成功）
-    t1, t2, t3, t4 = st.tabs([
-        "執行總覽", "信號動態", "已平倉", "研究室",
+    t1, t2, t3, t4, t5 = st.tabs([
+        "執行總覽", "信號動態", "已平倉", "研究室", "計算機",
     ])
     with t1:
         tab_exec(r, s)
@@ -464,6 +532,8 @@ def main():
             tab_research(r, s)
         else:
             st.info("等待回測資料...")
+    with t5:
+        tab_calculator()
 
 
 if __name__ == "__main__":

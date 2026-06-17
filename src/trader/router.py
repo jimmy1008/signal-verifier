@@ -173,6 +173,11 @@ class TradingRouter(BaseBroker):
         broker = self._route(symbol)
         return await broker.get_position_by_symbol(symbol)
 
+    async def check_margin_and_adjust(self, threshold: float = 0.4) -> None:
+        """轉發給 crypto broker"""
+        if self.crypto and hasattr(self.crypto, "check_margin_and_adjust"):
+            await self.crypto.check_margin_and_adjust(threshold=threshold)
+
     async def get_combined_account(self) -> dict:
         """取得兩邊帳戶的合併摘要"""
         result = {}

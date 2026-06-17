@@ -186,13 +186,32 @@ async def main():
         crypto_broker = None
         crypto_broker_h4 = None
         bingx_cfg = config.get("bingx", {})
-        if bingx_cfg.get("api_key") and bingx_cfg["api_key"] != "YOUR_BINGX_API_KEY":
+        trading_cfg = config.get("trading", {})
+        paper_mode = trading_cfg.get("paper_mode", False)
+
+        if paper_mode:
+            from src.trader.paper import PaperBroker
+            paper_balance = trading_cfg.get("paper_balance", 500.0)
+            crypto_broker = PaperBroker(
+                api_key=bingx_cfg.get("api_key", ""),
+                api_secret=bingx_cfg.get("api_secret", ""),
+                initial_balance=paper_balance,
+                leverage=bingx_cfg.get("leverage", 50),
+            )
+            crypto_broker_h4 = PaperBroker(
+                api_key=bingx_cfg.get("api_key", ""),
+                api_secret=bingx_cfg.get("api_secret", ""),
+                initial_balance=paper_balance,
+                leverage=bingx_cfg.get("leverage", 50),
+            )
+            logger.info(f"📝 模擬交易模式: H1/H4 各 ${paper_balance:.0f}")
+        elif bingx_cfg.get("api_key") and bingx_cfg["api_key"] != "YOUR_BINGX_API_KEY":
             from src.trader.bingx import BingXBroker
             crypto_broker = BingXBroker(
                 api_key=bingx_cfg["api_key"],
                 api_secret=bingx_cfg["api_secret"],
                 is_demo=bingx_cfg.get("is_demo", True),
-                leverage=bingx_cfg.get("leverage", 20),
+                leverage=bingx_cfg.get("leverage", 50),
                 margin_mode="isolated",
             )
             logger.info("BingX H1 主帳戶已設定")
@@ -203,7 +222,7 @@ async def main():
                     api_key=bingx_cfg["sub_api_key"],
                     api_secret=bingx_cfg["sub_api_secret"],
                     is_demo=bingx_cfg.get("is_demo", True),
-                    leverage=bingx_cfg.get("leverage", 20),
+                    leverage=bingx_cfg.get("leverage", 50),
                     margin_mode="isolated",
                 )
                 logger.info("BingX H4 子帳戶已設定")
@@ -252,13 +271,27 @@ async def main():
             logger.info(f"[H4 {name.upper()}] 餘額: {info['balance']:,.2f} {info['currency']}")
 
     # ─── 初始化執行器（H1 + H4）───
-    exec_config = ExecutorConfig(
-        risk_per_trade=args.risk,
-        max_positions=args.max_positions,
-    )
+    trading_cfg = config.get("trading", {})
+    h1_risk = trading_cfg.get("h1_risk_per_trade", args.risk)
+    h4_risk = trading_cfg.get("h4_risk_per_trade", args.risk)
+    h1_staged = trading_cfg.get("h1_staged_entry", False)
+    h1_blocked = trading_cfg.get("h1_blocked_symbols", [])
 
-    executor_h1 = TradeExecutor(broker_h1, exec_config, label="h1")
-    executor_h4 = TradeExecutor(broker_h4, exec_config, label="h4")
+    exec_config_h1 = ExecutorConfig(
+        risk_per_trade=h1_risk,
+        max_positions=args.max_positions,
+        staged_entry=h1_staged,
+        blocked_symbols=h1_blocked,
+    )
+    executor_h1 = TradeExecutor(broker_h1, exec_config_h1, label="h1")
+
+    # H4 用較長的監控間隔，減少 API 呼叫避免子帳戶 rate limit
+    exec_config_h4 = ExecutorConfig(
+        risk_per_trade=h4_risk,
+        max_positions=args.max_positions,
+        monitor_interval=30,
+    )
+    executor_h4 = TradeExecutor(broker_h4, exec_config_h4, label="h4")
 
     def _get_executor(timeframe: str) -> TradeExecutor:
         """根據 timeframe 選擇 executor"""
@@ -266,8 +299,12 @@ async def main():
             return executor_h4
         return executor_h1
 
-    logger.info("策略: TP4 出場, 分批 25%, 碰 TP1 保本")
-    logger.info(f"風險: {args.risk:.1%} / 筆, 最大持倉: {'無上限' if args.max_positions == 0 else args.max_positions}")
+    logger.info("策略: TP4 出場, 分批 50%, 移動止盈(TP2→TP1, TP3→TP2, TP4→TP3)")
+    logger.info(f"風險: H1={h1_risk:.1%} H4={h4_risk:.1%}, 最大持倉: {'無上限' if args.max_positions == 0 else args.max_positions}")
+    if h1_staged:
+        logger.info("H1 分批進場: 50% 進場 → TP1 加倉 50%")
+    if h1_blocked:
+        logger.info(f"H1 排除幣種: {', '.join(h1_blocked)}")
     if broker_h4 is not broker_h1:
         logger.info("雙帳戶模式: H1→主帳戶, H4→子帳戶")
     if args.dry_run:
@@ -287,6 +324,8 @@ async def main():
     channels = tg_cfg["channels"]
     chat_ids = [ch["chat_id"] for ch in channels]
     parser_map = {ch["chat_id"]: ch.get("parser", "default") for ch in channels}
+    observe_only = {ch["chat_id"] for ch in channels if ch.get("observe_only", False)}
+    channel_names = {ch["chat_id"]: ch.get("name", str(ch["chat_id"])) for ch in channels}
 
     # ─── 啟動持倉監控 ───
     if not args.dry_run:
@@ -348,11 +387,18 @@ async def main():
         if parsed is None:
             return
 
+        # 觀察模式：只記錄不下單
+        is_observe = msg.chat_id in observe_only
+        ch_name = channel_names.get(msg.chat_id, "")
+
         if parsed.signal_type == "entry":
             tf = parsed.timeframe or "1h"
-            executor = _get_executor(tf)
-            acct = "H4子帳戶" if "4" in tf else "H1主帳戶"
-            logger.info(f"[新信號] {parsed.symbol} {parsed.side.value} @ {parsed.entry} ({tf} → {acct})")
+            if is_observe:
+                logger.info(f"[觀察] {ch_name} {parsed.symbol} {parsed.side.value} @ {parsed.entry} SL={parsed.sl} TP1={parsed.tp1}~TP4={parsed.tp4}")
+            else:
+                executor = _get_executor(tf)
+                acct = "H4子帳戶" if "4" in tf else "H1主帳戶"
+                logger.info(f"[新信號] {parsed.symbol} {parsed.side.value} @ {parsed.entry} ({tf} → {acct})")
 
             # 存入 signals 表
             try:
@@ -382,6 +428,9 @@ async def main():
                 session.close()
             except Exception as e:
                 logger.debug(f"存 signal 失敗: {e}")
+
+            if is_observe:
+                return  # 觀察模式：只記錄到 DB，不下單
 
             try:
                 result = await executor.execute_signal(parsed)
@@ -450,11 +499,110 @@ async def main():
                 except Exception as e:
                     logger.debug(f"存 update 失敗: {e}")
 
+            if is_observe:
+                logger.info(f"[觀察] {ch_name} {parsed.update_type}: {parsed.update_value} (key={parsed.related_signal_key})")
+                return
+
             # 從 key 判斷 timeframe（如 BTCUSDTP4H032020 → 4h）
             key = parsed.related_signal_key or ""
             tf = "4h" if "4H" in key.upper() else "1h"
             executor = _get_executor(tf)
             await executor.handle_update(parsed)
+
+    # ─── 總餘額熔斷（低於閾值全平 + 停機）───
+    EQUITY_KILL_THRESHOLD = 200.0  # 總淨值低於此值觸發（$300 本金）
+
+    async def equity_kill_switch():
+        """每 60 秒檢查兩帳戶總淨值，低於閾值全平並停機"""
+        await asyncio.sleep(30)  # 啟動後等 30 秒
+        while True:
+            try:
+                total_equity = 0.0
+                acct_count = 0
+                for label, executor in [("H1", executor_h1), ("H4", executor_h4)]:
+                    try:
+                        acct = await executor.broker.get_account()
+                        eq = acct.balance  # 用 balance 不用 equity（避免 equity=0 的 fallback 問題）
+                        total_equity += eq
+                        acct_count += 1
+                        logger.info(f"[熔斷檢查] {label}: ${eq:.2f}")
+                    except Exception as e:
+                        logger.warning(f"[熔斷檢查] {label} 取餘額失敗: {e}")
+
+                # 兩個帳戶都要成功取到才判斷，避免單帳戶誤觸發
+                if acct_count < 2:
+                    logger.debug(f"[熔斷檢查] 只取到 {acct_count}/2 帳戶，跳過本輪")
+                elif total_equity > 0 and total_equity < EQUITY_KILL_THRESHOLD:
+                    logger.warning(f"[熔斷] 總淨值 ${total_equity:.2f} < ${EQUITY_KILL_THRESHOLD} → 全平並停機")
+
+                    # 全平所有持倉
+                    for label, executor in [("H1", executor_h1), ("H4", executor_h4)]:
+                        try:
+                            if not hasattr(executor.broker, 'exchange'):
+                                router = executor.broker
+                                if hasattr(router, 'crypto') and router.crypto:
+                                    ex = router.crypto.exchange
+                                else:
+                                    continue
+                            else:
+                                ex = executor.broker.exchange
+
+                            positions = await ex.fetch_positions()
+                            for p in positions:
+                                contracts = abs(float(p.get("contracts", 0)))
+                                if contracts <= 0:
+                                    continue
+                                sym = p["symbol"]
+                                pos_side = p.get("info", {}).get("positionSide", "")
+                                side = "sell" if p.get("side") == "long" else "buy"
+                                try:
+                                    await ex.create_order(
+                                        symbol=sym, type="market", side=side,
+                                        amount=contracts, params={"positionSide": pos_side},
+                                    )
+                                    logger.warning(f"[熔斷] {label} 已平 {sym} {pos_side} {contracts}")
+                                except Exception as e:
+                                    logger.error(f"[熔斷] {label} 平倉失敗 {sym}: {e}")
+
+                            # 取消所有掛單
+                            try:
+                                orders = await ex.fetch_open_orders()
+                                for o in orders:
+                                    try:
+                                        await ex.cancel_order(o["id"], o["symbol"])
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.error(f"[熔斷] {label} 處理異常: {e}")
+
+                    # 通知
+                    try:
+                        notify_cfg = config.get("notify", {})
+                        bot_token = notify_cfg.get("bot_token", "")
+                        chats = notify_cfg.get("chat_ids", [])
+                        if bot_token and chats:
+                            import httpx
+                            msg = f"🚨 <b>熔斷觸發</b>\n\n總淨值: ${total_equity:.2f}\n閾值: ${EQUITY_KILL_THRESHOLD}\n\n已全平所有持倉並停機"
+                            async with httpx.AsyncClient() as client:
+                                for cid in chats:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                                        json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
+                                    )
+                    except Exception:
+                        pass
+
+                    logger.warning("[熔斷] Bot 停機")
+                    import sys
+                    sys.exit(1)
+
+            except Exception as e:
+                logger.error(f"[熔斷檢查] 異常: {e}")
+            await asyncio.sleep(60)
+
+    kill_task = asyncio.create_task(equity_kill_switch())
 
     # ─── 定時補抓（防漏訊息）───
     async def poll_missed():

@@ -37,9 +37,9 @@ def playout(title="", h=320):
         template="plotly_dark", paper_bgcolor=BG, plot_bgcolor=BG,
         title=dict(text=title, font=dict(size=13, color=TEXT)),
         margin=dict(l=40, r=15, t=30, b=25), height=h,
-        font=dict(color=GRAY, size=10),
-        xaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER),
-        yaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER),
+        font=dict(color=GRAY, size=10, family="JetBrains Mono, Roboto Mono, Consolas, monospace"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor=BORDER, gridwidth=1, griddash="dot"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor=BORDER, gridwidth=1, griddash="dot"),
     )
 
 
@@ -95,6 +95,8 @@ def _get_ccxt_instance(api_key: str, api_secret: str):
     return ccxt.bingx({
         "apiKey": api_key, "secret": api_secret,
         "options": {"defaultType": "swap"},
+        "rateLimit": 500,
+        "enableRateLimit": True,
     })
 
 
@@ -194,7 +196,7 @@ def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
             traded_symbols.update(["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"])
             for sym in list(traded_symbols)[:10]:
                 try:
-                    trades = ex.fetch_my_trades(sym, limit=10)
+                    trades = ex.fetch_my_trades(sym, since=TRADE_START_TS, limit=50)
                     recent_trades.extend(trades)
                     _time.sleep(0.3)
                 except Exception as _e:
@@ -225,12 +227,177 @@ def _fetch_one_bingx(api_key, api_secret, cache_label="", fetch_trades=False):
     return account, open_pos, recent_trades, ex
 
 
+def _get_paper_data(trading_cfg):
+    """Paper 模式：從 executor state 計算模擬帳戶資料（含即時報價）"""
+    import json
+    from datetime import datetime as _dt
+    import ccxt
+
+    paper_balance = trading_cfg.get("paper_balance", 500.0)
+
+    # 取即時報價（同步）
+    _price_cache = {}
+    try:
+        from src.config import load_config
+        _cfg = load_config().get("bingx", {})
+        _ex = ccxt.bingx({"apiKey": _cfg.get("api_key", ""), "secret": _cfg.get("api_secret", ""),
+                          "options": {"defaultType": "swap"}})
+        _ex.load_markets()
+    except Exception:
+        _ex = None
+
+    def _get_price(symbol):
+        if symbol in _price_cache:
+            return _price_cache[symbol]
+        if not _ex:
+            return 0
+        try:
+            bingx_sym = symbol.replace("USDT.P", "/USDT:USDT")
+            t = _ex.fetch_ticker(bingx_sym)
+            p = float(t.get("last", 0))
+            _price_cache[symbol] = p
+            return p
+        except Exception:
+            return 0
+
+    def _build_account(label):
+        db_dir = Path(__file__).resolve().parent.parent.parent / "db"
+        state_file = db_dir / f"executor_state_{label}.json"
+        history_file = db_dir / f"trade_history_{label}.json"
+
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                states = json.load(f)
+        except Exception:
+            states = {}
+
+        # 讀取完整歷史（rebuild 產生的）
+        history = []
+        try:
+            if history_file.exists():
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+        except Exception:
+            pass
+
+        realized_pnl = 0.0
+        fee_total = 0.0
+        total_upnl = 0.0
+        open_positions = []
+        closed_trades = []
+
+        # 從 history 讀已平倉（realized_pnl 已含 fee 扣除）
+        for h in history:
+            pnl = h.get("realized_pnl", 0)
+            fee = h.get("fee", 0)
+            realized_pnl += pnl
+            fee_total += fee
+
+            exit_reason = h.get("close_reason", "")
+            # TP: 碰過 TP 的（含 TP4、TP3+SL、all_tp_closed 等）
+            # SL: 純 SL、NO_DATA（K線缺失視為虧損）
+            if "TP" in exit_reason or "tp" in exit_reason or "all_tp" in exit_reason:
+                exit_type = "TP"
+            elif pnl < 0:
+                exit_type = "SL"
+            else:
+                exit_type = "BE"
+
+            close_time_str = ""
+            for time_field in [h.get("closed_at", ""), h.get("opened_at", "")]:
+                if not time_field or not str(time_field).strip():
+                    continue
+                try:
+                    ts_str = str(time_field).strip()
+                    if "T" in ts_str or "+" in ts_str:
+                        ct = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    else:
+                        ct = _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                    close_time_str = ct.strftime("%m/%d %H:%M")
+                    break
+                except Exception:
+                    continue
+
+            sym_raw = h.get("symbol", "")
+            side_str = h.get("side", "")
+            closed_trades.append({
+                "symbol": sym_raw,
+                "sym": sym_raw.replace("USDT.P", ""),
+                "side": "LONG" if side_str == "long" else "SHORT",
+                "dir": "LONG" if side_str == "long" else "SHORT",
+                "pnl": pnl,
+                "fee": fee,
+                "exit": exit_type,
+                "time": close_time_str,
+                "entry_price": h.get("entry_price", 0),
+            })
+
+        # 從 executor state 讀未平倉持倉
+        for key, s in states.items():
+            if s.get("closed"):
+                continue
+            entry = s.get("entry_price", 0)
+            remaining = s.get("remaining_units", 0)
+            if remaining <= 0:
+                continue
+            side_str = s.get("side", "")
+            sym_raw = s.get("symbol", "")
+            sym = sym_raw.replace("USDT.P", "/USDT:USDT")
+            mark_price = _get_price(sym_raw)
+            if not mark_price:
+                mark_price = entry
+
+            if side_str == "long":
+                upnl = (mark_price - entry) * remaining
+            else:
+                upnl = (entry - mark_price) * remaining
+            total_upnl += upnl
+
+            notional = entry * remaining
+            margin = notional / 50
+            pnl_pct = (upnl / notional * 100) if notional > 0 else 0
+            open_fee = entry * remaining * 0.0005
+
+            open_positions.append({
+                "商品": sym,
+                "方向": "LONG" if side_str == "long" else "SHORT",
+                "保證金": f"${margin:.2f}",
+                "進場價": f"{entry:.4f}",
+                "標記價": f"{mark_price:.4f}",
+                "浮盈": f"${upnl:+.4f}",
+                "盈虧%": f"{pnl_pct:+.2f}%",
+                "槓桿": "50x",
+                "強平價": "-",
+            })
+
+        # realized_pnl 已含 fee 扣除，不再重複扣
+        balance = paper_balance + realized_pnl
+        equity = balance + total_upnl
+        return {
+            "balance": balance,
+            "equity": equity,
+            "unrealized_pnl": total_upnl,
+            "used": 0.0,
+            "available": balance,
+            "initial_capital": paper_balance,
+        }, open_positions, closed_trades
+
+    h1_acct, h1_pos, h1_trades = _build_account("h1")
+    h4_acct, h4_pos, h4_trades = _build_account("h4")
+    return h1_acct, h1_pos, h1_trades, h4_acct, h4_pos, h4_trades, None, None
+
+
 def get_bingx_data(fetch_trades=False):
-    """從 BingX 取得雙帳戶資料"""
+    """從 BingX 取得雙帳戶資料（支援 Paper 模式）"""
     try:
         from src.config import load_config
         config = load_config()
+        trading_cfg = config.get("trading", {})
         bingx_cfg = config.get("bingx", {})
+
+        # Paper 模式：從 executor state 讀取模擬資料
+        if trading_cfg.get("paper_mode"):
+            return _get_paper_data(trading_cfg)
 
         if not bingx_cfg.get("api_key") or bingx_cfg["api_key"] == "YOUR_BINGX_API_KEY":
             return None, None, None, None, None, None, None
@@ -246,10 +413,10 @@ def get_bingx_data(fetch_trades=False):
                 bingx_cfg["sub_api_key"], bingx_cfg["sub_api_secret"],
                 cache_label="h4", fetch_trades=fetch_trades)
 
-        return h1_account, h1_positions, h1_trades, h4_account, h4_positions, h4_trades, h1_ex
+        return h1_account, h1_positions, h1_trades, h4_account, h4_positions, h4_trades, h1_ex, h4_ex
 
     except Exception as e:
-        return {"error": str(e)}, None, None, None, None, None, None
+        return {"error": str(e)}, None, None, None, None, None, None, None
 
 
 # ── Bot 控制 ─────────────────────────────────────────
@@ -297,7 +464,7 @@ def bot_status():
     try:
         result = subprocess.run(
             ["wmic", "process", "where",
-             "name like '%python%' and commandline like '%auto_trade%'",
+             "name like '%python%' and commandline like '%signal-verifier%auto_trade%'",
              "get", "processid"],
             capture_output=True, text=True, timeout=5,
         )
@@ -386,11 +553,12 @@ def build_closed_positions(trades):
         _log.debug(f"靜默異常: {_e}")
         pass
 
-    opens = {}  # key: (sym, posSide) → {notional: Decimal, fee: Decimal, price: Decimal}
+    opens = {}    # key: (sym, posSide) → {notional, fee, price}
+    pending = {}  # key: (sym, posSide) → {pnl, fee, closes[], has_tp, has_sl, last_time, entry_price}
     closed = []
     seen = set()
 
-    D = Decimal  # 簡寫
+    D = Decimal
 
     for t in sorted(trades, key=lambda x: x.get("timestamp", 0)):
         try:
@@ -435,39 +603,52 @@ def build_closed_positions(trades):
                     raw_pnl = (avg_entry - price) * equiv_qty
 
                 net_pnl = raw_pnl - fee - entry_fee
-
                 order_type = str(info.get("type", "")).upper()
-                be_key = f"{sym}USDT.P|{pos_side.lower()}"
-                is_be_marked = be_marks.get(be_key, False)
 
-                # BE 判斷：有標記 OR 觸發價 ≈ 進場價（差距 < 0.2%）
-                stop_near_entry = abs(price - avg_entry) / avg_entry < D("0.002") if avg_entry > 0 else False
-
+                # 累積到 pending
+                if k not in pending:
+                    pending[k] = {"pnl": D("0"), "fee": D("0"), "has_tp": False, "has_sl": False,
+                                  "last_time": ts, "entry_price": avg_entry}
+                p = pending[k]
+                p["pnl"] += net_pnl
+                p["fee"] += fee
+                p["last_time"] = ts
                 if "TAKE_PROFIT" in order_type:
-                    exit_type = "TP"
+                    p["has_tp"] = True
                 elif "STOP" in order_type:
-                    if is_be_marked or stop_near_entry:
-                        exit_type = "BE"
-                    else:
-                        exit_type = "SL"
-                else:
-                    if (is_be_marked or stop_near_entry) and abs(raw_pnl) < D("0.5"):
-                        exit_type = "BE"
-                    elif raw_pnl > D("0.1"):
-                        exit_type = "TP"
-                    else:
-                        exit_type = "SL"
+                    p["has_sl"] = True
 
-                closed.append({
-                    "time": ts.strftime("%m/%d %H:%M"),
-                    "sym": sym, "dir": pos_side, "exit": exit_type,
-                    "pnl": float(net_pnl), "fee": float(fee),
-                })
-
+                # 更新 opens
                 if entry_info:
                     entry_info["notional"] -= notional
-                    if entry_info["notional"] <= 0:
+                    if entry_info["notional"] <= notional * D("0.05"):
+                        # 持倉已清完 → 結算這組交易
                         del opens[k]
+                        total_pnl = float(p["pnl"])
+                        total_fee = float(p["fee"])
+                        be_key = f"{sym}USDT.P|{pos_side.lower()}"
+                        stop_near = abs(float(p["entry_price"]) - float(price)) / float(p["entry_price"]) < 0.002 if float(p["entry_price"]) > 0 else False
+                        pnl_small = abs(total_pnl) < 1.0
+
+                        if p["has_tp"] and total_pnl > 0.1:
+                            exit_type = "TP"
+                        elif p["has_sl"] and stop_near and pnl_small:
+                            exit_type = "BE"
+                        elif p["has_sl"]:
+                            exit_type = "SL"
+                        elif stop_near and pnl_small:
+                            exit_type = "BE"
+                        elif total_pnl > 0.1:
+                            exit_type = "TP"
+                        else:
+                            exit_type = "SL"
+
+                        closed.append({
+                            "time": p["last_time"].strftime("%m/%d %H:%M"),
+                            "sym": sym, "dir": pos_side, "exit": exit_type,
+                            "pnl": total_pnl, "fee": total_fee,
+                        })
+                        del pending[k]
                     else:
                         entry_info["fee"] = D("0")
         except Exception as e:

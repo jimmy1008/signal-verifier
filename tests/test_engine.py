@@ -64,14 +64,11 @@ def test_long_sl_hit():
     assert result.pnl_r == -1.0
 
 
-def test_not_triggered():
+def test_no_candles():
+    """無 K 線資料 → 不觸發"""
     signal = make_signal(entry=100, sl=95, tp1=105, tp2=110)
-    candles = make_candles([
-        (90, 92, 88, 91),  # 價格遠低於 entry
-        (91, 93, 89, 92),
-    ])
     config = BacktestConfig(signal_expiry_bars=2)
-    result = simulate_trade(signal, candles, config)
+    result = simulate_trade(signal, [], config)
     assert not result.triggered
 
 

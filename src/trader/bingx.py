@@ -11,6 +11,7 @@ CRT SNIPER Symbol: BTCUSDT.P → BingX: BTC-USDT
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -65,7 +66,7 @@ class BingXBroker(BaseBroker):
         api_key: str,
         api_secret: str,
         is_demo: bool = True,
-        leverage: int = 20,
+        leverage: int = 50,
         margin_mode: str = "isolated",  # isolated = 逐倉, cross = 全倉
     ):
         options = {
@@ -79,6 +80,7 @@ class BingXBroker(BaseBroker):
             "apiKey": api_key,
             "secret": api_secret,
             "options": options,
+            "rateLimit": 500,  # 每次請求間隔 500ms（BingX 子帳戶限制較嚴）
         })
         self.is_demo = is_demo
         self.leverage = leverage
@@ -86,6 +88,33 @@ class BingXBroker(BaseBroker):
         self._configured_symbols: set = set()  # 已設定過槓桿的商品
         self._market_cache: dict[str, MarketInfo] = {}  # 交易對精度快取
         self._last_protection_failure: dict | None = None  # 最近一次保護單失敗
+        self._rate_limited_until: float = 0  # 100410 封鎖解除時間戳
+
+    async def _wait_if_rate_limited(self) -> None:
+        """如果被 100410 封鎖，等待解封"""
+        import time as _time
+        now = _time.time()
+        if now < self._rate_limited_until:
+            wait = self._rate_limited_until - now
+            logger.info(f"BingX rate limit 中，等待 {wait:.0f}s 解封...")
+            await asyncio.sleep(wait + 1)
+
+    def _handle_rate_limit(self, err_str: str) -> None:
+        """從 100410 錯誤解析解封時間"""
+        import time as _time
+        if "100410" not in err_str:
+            return
+        try:
+            # 提取 "unblocked after {timestamp}"
+            idx = err_str.index("unblocked after ")
+            ts_str = err_str[idx + 16:].split('"')[0].strip()
+            unlock_ts = int(ts_str) / 1000
+            self._rate_limited_until = unlock_ts
+            wait = unlock_ts - _time.time()
+            logger.warning(f"BingX 觸發 rate limit，{wait:.0f}s 後解封")
+        except Exception:
+            # 解析失敗，保守等 60 秒
+            self._rate_limited_until = _time.time() + 60
 
     async def connect(self) -> bool:
         try:
@@ -100,6 +129,7 @@ class BingXBroker(BaseBroker):
             return False
 
     async def get_account(self) -> AccountInfo:
+        await self._wait_if_rate_limited()
         balance = await self.exchange.fetch_balance()
         usdt = balance.get("USDT", {})
         return AccountInfo(
@@ -112,6 +142,7 @@ class BingXBroker(BaseBroker):
         )
 
     async def get_price(self, symbol: str) -> tuple[float, float]:
+        await self._wait_if_rate_limited()
         bingx_sym = to_bingx_symbol(symbol)
         ticker = await self.exchange.fetch_ticker(bingx_sym)
         bid = ticker.get("bid", 0) or ticker.get("last", 0)
@@ -338,6 +369,7 @@ class BingXBroker(BaseBroker):
 
         except Exception as e:
             err_str = str(e)
+            self._handle_rate_limit(err_str)
             # 保證金不足 → 嘗試調高現有倉位槓桿釋放保證金
             if "Insufficient margin" in err_str or "101204" in err_str:
                 logger.warning(f"保證金不足，嘗試調高現有倉位槓桿釋放保證金...")
@@ -349,8 +381,10 @@ class BingXBroker(BaseBroker):
             return OrderResult(success=False, symbol=symbol, error=err_str)
 
     async def _free_margin_and_retry(self, bingx_sym, ccxt_side, units, pos_side, sl, tp, tp3):
-        """保證金不足時，逐步調高現有倉位槓桿釋放保證金，然後重試開倉"""
+        """保證金不足時，將現有倉位槓桿直接調到上限釋放保證金，然後重試開倉"""
         try:
+            MAX_LEVERAGE = 150  # BingX 主流幣種上限
+
             positions = await self.exchange.fetch_positions()
             open_pos = [(p.get("symbol"), p.get("leverage", 10)) for p in positions
                         if abs(float(p.get("contracts", 0))) > 0]
@@ -358,21 +392,26 @@ class BingXBroker(BaseBroker):
             if not open_pos:
                 return None
 
-            # 從低槓桿的開始調高（每次 +5x，最高 20x）
+            # 低於上限的全部一次拉到上限
+            adjusted = False
             for sym, cur_lev in sorted(open_pos, key=lambda x: float(x[1])):
                 cur_lev = int(float(cur_lev))
-                if cur_lev >= 50:
+                if cur_lev >= MAX_LEVERAGE:
                     continue
-                new_lev = min(cur_lev + 10, 50)
                 try:
                     for s in ["LONG", "SHORT"]:
                         try:
-                            await self.exchange.set_leverage(new_lev, sym, params={"side": s})
+                            await self.exchange.set_leverage(MAX_LEVERAGE, sym, params={"side": s})
                         except Exception:
                             pass
-                    logger.info(f"[{sym}] 槓桿 {cur_lev}x → {new_lev}x（釋放保證金）")
+                    logger.info(f"[{sym}] 槓桿 {cur_lev}x → {MAX_LEVERAGE}x（釋放保證金）")
+                    adjusted = True
                 except Exception as e:
                     logger.debug(f"調槓桿失敗 {sym}: {e}")
+
+            if not adjusted:
+                logger.warning(f"所有倉位已達 {MAX_LEVERAGE}x 上限，無法再釋放保證金")
+                return None
 
             # 重試開倉
             close_side = "sell" if pos_side == "LONG" else "buy"
@@ -484,14 +523,16 @@ class BingXBroker(BaseBroker):
             pos_side = "LONG" if side_str == "long" else "SHORT"
 
             # 只取消該方向的 SL 掛單（保留 TP 掛單）
+            # 注意：ccxt 把 STOP_MARKET normalize 成 type="market"，必須用 info.type 判斷
             if sl is not None:
                 try:
                     open_orders = await self.exchange.fetch_open_orders(target_sym)
                     for order in open_orders:
-                        otype = str(order.get("type", "")).lower()
+                        raw_type = str(order.get("info", {}).get("type", "")).upper()
                         oside = str(order.get("side", "")).lower()
                         order_pos_side = order.get("info", {}).get("positionSide", "")
-                        if "stop" in otype and "profit" not in otype and oside == close_side:
+                        is_sl = raw_type == "STOP_MARKET" or (raw_type == "STOP" and "PROFIT" not in raw_type)
+                        if is_sl and oside == close_side:
                             if order_pos_side and order_pos_side != pos_side:
                                 continue
                             await self.exchange.cancel_order(order["id"], target_sym)
@@ -511,6 +552,7 @@ class BingXBroker(BaseBroker):
 
         except Exception as e:
             err = str(e)
+            self._handle_rate_limit(err)
             if "should be greater" in err or "should be less" in err:
                 # 價格已超過保本價（盈利中），不需要移 SL
                 logger.info(f"[{symbol}] SL 移動跳過：價格已超過保本價（持倉盈利中）")
@@ -581,7 +623,7 @@ class BingXBroker(BaseBroker):
             logger.warning(f"保證金佔用 {ratio:.0%} > {threshold:.0%}，自動調高槓桿釋放保證金")
 
             positions = await self.exchange.fetch_positions()
-            # 從低槓桿的開始調，每次 +10x，無上限
+            # 從低槓桿的開始調，每次 +10x，最高 150x
             for pos in sorted(positions, key=lambda p: float(p.get("leverage", 0))):
                 contracts = abs(float(pos.get("contracts", 0)))
                 if contracts <= 0:

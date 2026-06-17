@@ -3,8 +3,8 @@ import httpx
 import time
 from datetime import datetime
 
-BOT_TOKEN = "8638279159:AAGbpj6ObzahCWWcBfaYG3BFK6d5KF7RKmk"
-CHAT_ID = 8369686742  # 對方
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+CHAT_ID = 0  # 對方的 chat_id
 
 # Wait until 24:00
 now = datetime.now()

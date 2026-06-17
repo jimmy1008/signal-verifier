@@ -42,40 +42,99 @@ TradeExecutor
 | 回測引擎 | 歷史 K 線回測，支援多種出場規則 |
 | 儀表板 | Streamlit Dashboard，含 Equity Curve |
 
-## 快速開始
+## Setup Guide
+
+### Step 1 — 安裝環境
+
+Python 3.11+ 建議。
 
 ```bash
 pip install -r requirements.txt
 cp config/config.example.yaml config/config.yaml
-# 填入 Telegram API credentials 和 BingX API keys
 ```
 
-### 模擬模式（不下單）
+---
 
+### Step 2 — Telegram API（必須）
+
+前往 [https://my.telegram.org](https://my.telegram.org) 登入後建立應用程式，取得：
+
+- `api_id`
+- `api_hash`
+
+填入 `config.yaml` 的 `telegram` 區塊，並填上自己的手機號碼。
+
+> 第一次執行時會要求輸入 Telegram 驗證碼，之後產生 `.session` 檔案，後續自動登入。
+
+---
+
+### Step 3 — 加入 CRT Sniper 頻道（必須）
+
+程式只能監聽自己帳號已加入的頻道。加入後執行以下指令查詢 chat_id：
+
+```bash
+python scripts/find_chats.py
+```
+
+將取得的 chat_id 填入 `config.yaml` 的 `channels` 清單。
+
+---
+
+### Step 4 — BingX API（實盤必須，模擬可跳過）
+
+1. 開 BingX 帳號並開通永續合約交易權限
+2. 後台建立 API Key，勾選「交易」權限
+3. 填入 `api_key` + `api_secret`
+4. 選填：建子帳號並填入 `sub_api_key` + `sub_api_secret`（H4 信號用）
+
+若只想模擬交易，設定 `trading.paper_mode: true`，BingX API key 不需要真實值。
+
+---
+
+### Step 5 — 通知 Bot（選填但建議）
+
+熔斷、漏跳偵測、狀態報告都靠此推送。
+
+1. 在 Telegram 找 @BotFather，建立 bot 取得 `bot_token`
+2. 找 @userinfobot 查詢自己的 `chat_id`
+3. 填入 `config.yaml` 的 `notify` 區塊
+
+---
+
+### Step 6 — 初始化資料庫
+
+```bash
+python -c "from src.config import load_config; from src.database import init_db; init_db(load_config()['database']['url'])"
+```
+
+---
+
+### 啟動
+
+**模擬模式（只需 Telegram API + 加入頻道）：**
 ```bash
 python scripts/auto_trade.py --dry-run
 ```
 
-### 實盤
-
+**實盤：**
 ```bash
 python scripts/auto_trade.py
 ```
 
-### 儀表板
-
+**儀表板：**
 ```bash
 streamlit run src/dashboard/app.py
 ```
 
-### 回測
-
+**回測：**
 ```bash
 python scripts/fetch_history.py   # 抓歷史訊息
 python scripts/run_backtest.py    # 執行回測
 ```
 
-## 設定（config/config.yaml）
+---
+
+## 設定速覽（config/config.yaml）
 
 ```yaml
 telegram:

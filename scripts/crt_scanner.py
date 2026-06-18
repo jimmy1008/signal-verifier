@@ -29,9 +29,32 @@ SHORT（對稱）：
 
 Sweep 分布：90.8% 掃 C-1，9.2% 掃 C-2
 
+━━ 逆向工程 Filter（已驗證）━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ① 區間評級  ← C-1 body_ratio（驗證 90.7%）
+     body_ratio = |C-1.close - C-1.open| / (C-1.high - C-1.low)
+     🟢 高：>= 0.50（舊版）或 >= 0.65（新版）
+     🟡 中：0.25~0.50 / 0.35~0.65
+     🔴 低：<= 0.25（舊版）或 <= 0.35（新版）
+     → min_range_body_ratio=0.35 可過濾掉低品質區間信號
+
+  ② 相對位置  ← entry vs 前一日 PDH/PDL（驗證 95.2%）
+     PDH = 前一個 UTC 日曆日所有 K 線的最高 high
+     PDL = 前一個 UTC 日曆日所有 K 線的最低 low
+     fib50 = (PDH + PDL) / 2
+     折價區 Discount：entry < fib50  ← LONG 理想進場
+     溢價區 Premium ：entry > fib50  ← SHORT 理想進場
+     已突破 PDH     ：entry > PDH
+     已跌破 PDL     ：entry < PDL
+     → require_discount_long / require_premium_short 過濾用
+
+  ③ TBS（1M/3M/5M）← 低時框確認（需另抓 1M/3M/5M K 線，暫不實作）
+     TBS = 1M / 3M / 5M 各時框的吞沒/CRT 確認
+
 使用方式：
   python scripts/crt_scanner.py --mode validate
   python scripts/crt_scanner.py --mode validate --symbol BTCUSDT.P
+  python scripts/crt_scanner.py --mode validate --min-body-ratio 0.35
   python scripts/crt_scanner.py --mode live --symbols BTCUSDT.P ETHUSDT.P SOLUSDT.P
 """
 
@@ -78,6 +101,18 @@ class ScannerConfig:
     # 不允許 C0 突破 sweep candle 的高點
     require_no_high_break: bool = False
 
+    # ── 逆向工程新增 Filter ──────────────────────────────
+    # ① 區間評級：C-1 body_ratio 門檻（0 = 不過濾）
+    # 0.35 = 過濾掉 🔴 低（<35%），只留 🟡中 + 🟢高
+    # 0.50 = 只留 🟢 高（舊版門檻）
+    min_range_body_ratio: float = 0.0
+
+    # ② 相對位置：entry vs 前一日 PDH/PDL
+    # True = LONG 只在折價區（entry < prev_day_fib50）才進場
+    require_discount_long: bool = False
+    # True = SHORT 只在溢價區（entry > prev_day_fib50）才進場
+    require_premium_short: bool = False
+
 
 # ============================================================
 # CRT 信號 dataclass
@@ -98,16 +133,44 @@ class CRTSignal:
     rr_at_tp2: float
     sweep_lb: int      # 掃到前第幾根
     range_lb: int      # range candle 在前第幾根
+    # Filter metadata（供後處理參考）
+    range_body_ratio: float = 0.0   # C-1 body_ratio（區間評級）
+    prev_day_pdh: float = 0.0       # 前日最高（相對位置參考）
+    prev_day_pdl: float = 0.0       # 前日最低
+    relative_pos: str = ""          # Discount / Premium / PDH_break / PDL_break / unknown
 
 
 # ============================================================
 # 核心偵測函式
 # ============================================================
 
+def _body_ratio(c: dict) -> float:
+    rng = (c["high"] - c["low"]) or 0.0001
+    return abs(c["close"] - c["open"]) / rng
+
+
+def _relative_pos(entry: float, pdh: float, pdl: float) -> str:
+    """前一日 PDH/PDL 相對位置分類"""
+    if pdh <= 0 or pdl <= 0 or pdh <= pdl:
+        return "unknown"
+    fib50 = (pdh + pdl) / 2
+    if entry > pdh:
+        return "PDH_break"
+    if entry < pdl:
+        return "PDL_break"
+    if entry >= fib50:
+        return "Premium"
+    return "Discount"
+
+
 def detect_crt(candles: list[dict], symbol: str, timeframe: str,
-               cfg: ScannerConfig = ScannerConfig()) -> Optional[CRTSignal]:
+               cfg: ScannerConfig = ScannerConfig(),
+               prev_day_high: float = 0.0,
+               prev_day_low: float = 0.0) -> Optional[CRTSignal]:
     """
     candles: 時間升序的 OHLCV dict 列表，至少需要 cfg.sweep_lookbacks[-1]+cfg.range_offset+2 根
+    prev_day_high/prev_day_low: 前一個 UTC 日曆日的 H/L，用於相對位置 filter
+
     回傳第一個符合條件的 CRT 信號，否則回傳 None
     """
     if len(candles) < 5:
@@ -115,6 +178,7 @@ def detect_crt(candles: list[dict], symbol: str, timeframe: str,
 
     c0 = candles[-1]
     entry = c0["close"]
+    rel_pos = _relative_pos(entry, prev_day_high, prev_day_low)
 
     # ── LONG 掃描 ──
     for sweep_lb in cfg.sweep_lookbacks:
@@ -135,6 +199,15 @@ def detect_crt(candles: list[dict], symbol: str, timeframe: str,
             continue
         # No high break（選擇性）
         if cfg.require_no_high_break and c0["high"] >= sweep_c["high"]:
+            continue
+
+        # ① 區間評級 filter：C-1 body_ratio
+        br = _body_ratio(sweep_c)
+        if br < cfg.min_range_body_ratio:
+            continue
+
+        # ② 相對位置 filter：LONG 要在折價區
+        if cfg.require_discount_long and rel_pos not in ("Discount", "PDL_break", "unknown"):
             continue
 
         # TP2 = range_c.high
@@ -173,6 +246,9 @@ def detect_crt(candles: list[dict], symbol: str, timeframe: str,
             tp3=round(tp3, 6), tp4=round(tp4, 6),
             rr_at_tp2=round(rr, 3), sweep_lb=sweep_lb,
             range_lb=sweep_lb + cfg.range_offset,
+            range_body_ratio=round(br, 3),
+            prev_day_pdh=prev_day_high, prev_day_pdl=prev_day_low,
+            relative_pos=rel_pos,
         )
 
     # ── SHORT 掃描 ──
@@ -191,6 +267,15 @@ def detect_crt(candles: list[dict], symbol: str, timeframe: str,
         if c0["close"] >= sweep_c["high"]:
             continue
         if cfg.require_no_high_break and c0["low"] <= sweep_c["low"]:
+            continue
+
+        # ① 區間評級 filter：C-1 body_ratio
+        br = _body_ratio(sweep_c)
+        if br < cfg.min_range_body_ratio:
+            continue
+
+        # ② 相對位置 filter：SHORT 要在溢價區
+        if cfg.require_premium_short and rel_pos not in ("Premium", "PDH_break", "unknown"):
             continue
 
         tp2 = range_c["low"]
@@ -223,6 +308,9 @@ def detect_crt(candles: list[dict], symbol: str, timeframe: str,
             tp3=round(tp3, 6), tp4=round(tp4, 6),
             rr_at_tp2=round(rr, 3), sweep_lb=sweep_lb,
             range_lb=sweep_lb + cfg.range_offset,
+            range_body_ratio=round(br, 3),
+            prev_day_pdh=prev_day_high, prev_day_pdl=prev_day_low,
+            relative_pos=rel_pos,
         )
 
     return None
@@ -278,11 +366,29 @@ def bingx_to_ccxt_symbol(symbol: str) -> str:
     return forex.get(s, symbol)
 
 
+def _get_prev_day_range(session, ccxt_sym: str, sig_time: datetime) -> tuple[float, float]:
+    """前一個 UTC 日曆日的 H/L（用 1H K 線聚合）"""
+    from src.models import CandleORM
+    prev_start = sig_time.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    prev_end   = prev_start + timedelta(days=1)
+    row = session.execute(
+        __import__("sqlalchemy").text(
+            "SELECT MAX(high), MIN(low) FROM candles "
+            "WHERE symbol=:sym AND timeframe='1h' "
+            "AND open_time>=:s AND open_time<:e"
+        ),
+        {"sym": ccxt_sym, "s": prev_start, "e": prev_end},
+    ).fetchone()
+    if row and row[0] and row[1]:
+        return float(row[0]), float(row[1])
+    return 0.0, 0.0
+
+
 def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfig(),
              max_signals: int = 500, verbose: bool = False):
     """
     對每筆 DB 信號，用對應時段的 K 線跑掃描器，比對結果
-    輸出：Recall / Precision / TP 誤差
+    輸出：Recall / Precision / TP 誤差 / Filter 命中率
     """
     from src.config import load_config
     from src.database import init_db, get_session
@@ -310,15 +416,16 @@ def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfi
     tp3_errors = []
     tp4_errors = []
     sweep_lb_dist = {}
+    # Filter stats
+    rel_pos_dist = {}
+    body_ratio_bins = {"high(>=0.50)": 0, "mid(0.25-0.50)": 0, "low(<0.25)": 0}
 
     for sig in db_signals:
         tf = sig.timeframe or "1h"
         ccxt_sym = bingx_to_ccxt_symbol(sig.symbol)
 
-        # 對齊到 K 線邊界，避免把剛開盤的不完整 K 線當 C0
         st = sig.signal_time
         if tf in ("1h", "1H"):
-            # 最後完整的 1H K 線開盤時間 = signal_time 的整點（如 14:02 → 13:00）
             cutoff = st.replace(minute=0, second=0, microsecond=0)
         elif tf in ("4h", "4H"):
             cutoff = st.replace(minute=0, second=0, microsecond=0)
@@ -326,7 +433,6 @@ def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfi
         else:
             cutoff = st
 
-        # 從 DB 撈 K 線（只取完整 K 線：open_time < cutoff，即 cutoff 整點之前）
         rows = (
             session.query(CandleORM)
             .filter(
@@ -349,8 +455,12 @@ def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfi
             for r in rows
         ]
 
+        # 取前一日 PDH/PDL（用於相對位置 filter）
+        pdh, pdl = _get_prev_day_range(session, ccxt_sym, st)
+
         total += 1
-        result = detect_crt(candles, ccxt_sym, tf, cfg)
+        result = detect_crt(candles, ccxt_sym, tf, cfg,
+                             prev_day_high=pdh, prev_day_low=pdl)
 
         if result is None:
             if verbose:
@@ -381,6 +491,14 @@ def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfi
         lb = result.sweep_lb
         sweep_lb_dist[lb] = sweep_lb_dist.get(lb, 0) + 1
 
+        # Filter metadata stats
+        rp = result.relative_pos
+        rel_pos_dist[rp] = rel_pos_dist.get(rp, 0) + 1
+        br = result.range_body_ratio
+        if br >= 0.50:   body_ratio_bins["high(>=0.50)"] += 1
+        elif br >= 0.25: body_ratio_bins["mid(0.25-0.50)"] += 1
+        else:            body_ratio_bins["low(<0.25)"] += 1
+
     session.close()
 
     recall = matched / total if total else 0
@@ -404,6 +522,15 @@ def validate(symbol_filter: str | None = None, cfg: ScannerConfig = ScannerConfi
     for lb in sorted(sweep_lb_dist):
         cnt = sweep_lb_dist[lb]
         print(f"  前 {lb} 根：{cnt} ({cnt/matched:.1%})")
+
+    if matched:
+        print("\n區間評級分布（C-1 body_ratio）：")
+        for k, v in body_ratio_bins.items():
+            print(f"  {k}：{v} ({v/matched:.1%})")
+
+        print("\n相對位置分布（vs 前日 PDH/PDL）：")
+        for k, v in sorted(rel_pos_dist.items(), key=lambda x: -x[1]):
+            print(f"  {k}：{v} ({v/matched:.1%})")
 
     return recall
 
@@ -495,7 +622,7 @@ def live_scan(symbols: list[str], timeframe: str = "1h",
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="CRT 自主掃描器")
     parser.add_argument("--mode", default="validate", choices=["validate", "live", "grid"])
     parser.add_argument("--symbol", default=None, help="單一幣種過濾（validate 用）")
     parser.add_argument("--symbols", nargs="+", default=["BTC/USDT", "ETH/USDT", "SOL/USDT"],
@@ -503,9 +630,20 @@ def main():
     parser.add_argument("--tf", default="1h")
     parser.add_argument("--max", type=int, default=800, help="驗證最多 N 筆")
     parser.add_argument("--verbose", action="store_true")
+    # Filter args
+    parser.add_argument("--min-body-ratio", type=float, default=0.0,
+                        help="區間評級：C-1 body_ratio 最低門檻（0=不過濾，0.35=只取中高，0.50=只取高）")
+    parser.add_argument("--discount-long", action="store_true",
+                        help="相對位置：LONG 只在前日折價區（entry < prev_day_fib50）")
+    parser.add_argument("--premium-short", action="store_true",
+                        help="相對位置：SHORT 只在前日溢價區（entry > prev_day_fib50）")
     args = parser.parse_args()
 
-    cfg = ScannerConfig()
+    cfg = ScannerConfig(
+        min_range_body_ratio=args.min_body_ratio,
+        require_discount_long=args.discount_long,
+        require_premium_short=args.premium_short,
+    )
 
     if args.mode == "validate":
         validate(symbol_filter=args.symbol, cfg=cfg,

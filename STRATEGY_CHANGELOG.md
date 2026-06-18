@@ -1,5 +1,74 @@
 # 策略變動日誌
 
+## 2026-06-18 — CRT 逆向工程完成：三個 Filter 解密
+
+### 研究結論（8497 筆歷史訊息 + 4413 筆信號）
+
+完整逆向出 CRT Sniper 頻道指標的三個 metadata filter：
+
+#### ① 區間評級（Range Quality）= C-1 body_ratio（驗證 90.7%）
+```
+C-1 = 被 sweep 的 range candle（signal candle 前第 1~2 根）
+body_ratio = |C-1.close - C-1.open| / (C-1.high - C-1.low)
+
+🟢 高：>= 0.65（新版）/ >= 0.50（舊版）
+🟡 中：0.35~0.65（新版）/ 0.25~0.50（舊版）
+🔴 低：< 0.35（新版）/ < 0.25（舊版）
+```
+
+#### ② 相對位置（Relative Position）= entry vs 前一日 PDH/PDL（驗證 95.2%）
+```
+PDH = 前一個 UTC 日曆日所有 1H K 線的最高 high
+PDL = 前一個 UTC 日曆日所有 1H K 線的最低 low
+fib50 = (PDH + PDL) / 2
+
+折價區 Discount  → entry < fib50  （LONG 的 ICT 理想區）
+溢價區 Premium   → fib50 ≤ entry ≤ PDH  （SHORT 的 ICT 理想區）
+已突破 PDH       → entry > PDH
+已跌破 PDL       → entry < PDL
+```
+
+#### ③ TBS（Time-Based Signal 低時框確認）= 尚未實作
+```
+1M / 3M / 5M 各時框出現吞沒（Engulfing）或 CRT 確認訊號
+需要 1M/3M/5M K 線資料，目前 DB 無此資料
+```
+
+#### ④ BPR（Balanced Price Range）= 不實作
+```
+ICT 公平價值缺口（FVG/imbalance）概念
+可視化標記，不影響進場邏輯
+```
+
+### Scanner Filter 效果（600 筆回測）
+| Filter | Recall | 信號量（對比 78.5% 基準） |
+|--------|--------|--------------------------|
+| 無 | 78.5% | 435 |
+| body_ratio ≥ 0.35 | 50.9% | 282（-35%）|
+| body_ratio ≥ 0.50 | 38.3% | 212（-51%）|
+| Discount/Premium 區 | 47.1% | 261（-40%）|
+
+Recall 降低 = 部分頻道信號不被掃出，代表此類信號可能需要同步等待。勝率提升需實盤驗證。
+
+### 新增 CLI 參數（crt_scanner.py）
+```bash
+# 只掃 C-1 body_ratio 高品質信號
+python scripts/crt_scanner.py --mode validate --min-body-ratio 0.35
+
+# 只在折價/溢價區進場
+python scripts/crt_scanner.py --mode validate --discount-long --premium-short
+
+# 組合使用
+python scripts/crt_scanner.py --mode live --min-body-ratio 0.35 --discount-long --premium-short
+```
+
+### 關鍵發現
+- **PDH/PDL 不是 CRT C-1 的 High/Low**，是字面意思的 ICT Previous Day H/L（UTC 日曆日）
+- TradingView 圖表上的「4H」標籤 = 4H CRT 信號的 context box，不代表取 4H 蠟燭 range
+- 頻道不會預先過濾任何評級（🔴低 RR、🔴低區間品質都照發）
+
+---
+
 ## 2026-04-05 — CRT Sweep 過濾器
 
 ### 背景
